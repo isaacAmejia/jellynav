@@ -24,12 +24,32 @@ JellyNav is designed for **Jellyfin Web** running in a browser or webview, inclu
 
 JellyNav is a JavaScript frontend enhancement. The easiest way to load it is with [Jellyfin JavaScript Injector](https://github.com/n00bcodr/Jellyfin-JavaScript-Injector).
 
+### Recommended: GitHub auto-update loader
+
+This keeps only a tiny loader in JavaScript Injector. Each new Jellyfin page load fetches the current stable JellyNav script from this repository's `main` branch with browser caching disabled.
+
 1. Install **JavaScript Injector** in Jellyfin.
 2. Open **Dashboard → Plugins → JavaScript Injector**.
-3. Add a new script named **JellyNav**.
-4. Copy the full contents of [`src/jellyfin-tv-navigation.js`](src/jellyfin-tv-navigation.js).
+3. Add a new script named **JellyNav Loader**.
+4. Copy the full contents of [`install/remote-loader.js`](install/remote-loader.js).
 5. Paste it into the JavaScript Code field, enable it, and save.
-6. Reload Jellyfin Web.
+6. Disable/remove any older full JellyNav script entry.
+7. Reload Jellyfin Web.
+
+After future stable JellyNav updates are pushed to `main`, reload Jellyfin Web to receive the new build. The loader keeps the last successfully downloaded build in browser storage as a fallback if GitHub is temporarily unreachable.
+
+Raw stable loader:
+
+`https://raw.githubusercontent.com/isaacAmejia/jellynav/main/install/remote-loader.js`
+
+### Manual install
+
+If you prefer a pinned/manual copy instead of automatic updates:
+
+1. Add a new JavaScript Injector script named **JellyNav**.
+2. Copy the full contents of [`src/jellyfin-tv-navigation.js`](src/jellyfin-tv-navigation.js).
+3. Paste it into the JavaScript Code field, enable it, and save.
+4. Reload Jellyfin Web.
 
 For Jellyfin 12, the JavaScript Injector repository is:
 
@@ -94,9 +114,11 @@ window.__JELLYFIN_TV_REMOTE__?.state?.()
 
 ## Updating
 
-Open your existing **JellyNav** JavaScript Injector entry, replace its contents with the newest [`src/jellyfin-tv-navigation.js`](src/jellyfin-tv-navigation.js), save, and reload Jellyfin Web.
+If you use the recommended **JellyNav Loader**, no script replacement is needed. Once a stable change is pushed to `main`, reload Jellyfin Web and the loader fetches it automatically.
 
-Keep only **one enabled copy** of JellyNav.
+If you installed the full script manually, replace the existing Injector entry with the newest [`src/jellyfin-tv-navigation.js`](src/jellyfin-tv-navigation.js), save, and reload.
+
+Keep only **one enabled JellyNav entry**: either the loader or the full script, never both.
 
 ## Compatibility
 

@@ -95,7 +95,7 @@ If both are installed, JellyNav automatically recognizes JellyMark's Watchlist i
 ## Current release
 
 ```text
-2026.09.30-r12.19-jellymark-compatibility
+2026.10.03-r12.24.1
 ```
 
 The stable `main` branch targets Jellyfin 12.1-era **Legacy / TV** UI. Modern UI work remains separate until it is ready for the same level of hands-on testing.

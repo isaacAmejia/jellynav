@@ -1,5 +1,38 @@
 # Changelog
 
+## Release — r12.24.1
+
+Internal version: `2026.10.03-r12.24.1`
+
+Major navigation-stability release for the Legacy / TV interface.
+
+- Adds per-row navigation memory:
+  - a row visited for the first time starts on its first card
+  - returning to a previously visited row restores that row's own selected card
+  - each row also restores its own horizontal Jellyfin carousel position
+- Uses Jellyfin's native `emby-scroller` APIs for horizontal movement, including transform-mode carousels, so Left/Right movement no longer depends on plain `scrollLeft`.
+- Keeps vertical page position isolated from horizontal carousel movement.
+- Improves Home lazy loading:
+  - rapid repeated Down keeps one pending move alive
+  - same-route Home DOM replacement no longer cancels the pending move
+  - newly mounted rows are recovered by stable media identity
+- Refines SeerrFin Discover navigation:
+  - Movies, Shows, and Settings form one logical TV-control row
+  - Requests is skipped by D-pad navigation
+  - Down enters the first media row without scrolling the Discover controls
+- Jellyfin Search now buffers TV-keyboard input locally and does not trigger Jellyfin search until the on-screen **SEARCH** button is pressed.
+- Jellyfin Enhanced request flows now support both the initial Request / Request More control and the final request confirmation button.
+- Focus-ring handoff is immediate during rapid navigation so a valid selection does not disappear between animation frames.
+- JellyMark navigation is hierarchical:
+  - content / controls → active Watchlist sub-tab
+  - sub-tab → main Watchlist tab
+  - short Back on the main Watchlist tab does nothing
+  - long Back remains Universal Home
+- Adds hardware-sensitive Back handling so delayed keyup events from CEC/remapped remotes are not misread as a Watchlist long press without actual repeat events.
+- Preserves 900 ms hold Enter / OK refresh and 900 ms hold Back / Escape Universal Home outside the Watchlist timing guard.
+- Maintains player OSD, ActionSheet, Enhanced pause-screen, Details Play/Resume, native library, SeerrFin grid, and Universal Home behavior from earlier stable releases.
+- Compatible with the independent JellyMark project, including JellyMark 3.2.2's persistent top-level Watchlist tab and delegated Back ownership.
+
 ## Release — r12.19
 
 Internal version: `2026.09.30-r12.19-jellymark-compatibility`

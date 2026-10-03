@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '2026.09.30-r12.19-jellymark-compatibility';
+  const VERSION = '2026.10.03-r12.24.1';
   const LONG_PRESS_REFRESH_MS = 900;
   const LONG_PRESS_HOME_MS = 900;
 
@@ -24,6 +24,7 @@
   let rows = [];
   let rowIndex = 0;
   let cardIndex = 0;
+  const rowNavigationMemory = new Map();
 
   let zone = 'library';
   let mediaControlIndex = 0;
@@ -58,6 +59,7 @@
   let extIndex = 0;
 
   let selectMode = null;
+  let nativeEditingControl = null;
   let detailFocusRoot = null;
   let detailPrimaryPending = true;
   let detailObserver = null;
@@ -71,6 +73,10 @@
 
   let keyboardRoot = null;
   let keyboardInput = null;
+  let keyboardFormContext = false;
+  let keyboardValue = '';
+  let keyboardLiveSearch = false;
+  let keyboardSearchTimer = null;
   let keyboardRow = 0;
   let keyboardColumn = 0;
 
@@ -81,16 +87,31 @@
   let backHeld = false;
   let backLongTriggered = false;
   let backLongTimer = null;
+  let backPressStartedAt = 0;
+  let backRepeatSeen = false;
 
   let focusRevealToken = 0;
   let focusArrivalAnimation = null;
   let lastFocusMetrics = null;
+  let focusTarget = null;
+  let focusTrackingFrame = null;
+  let focusTrackingRect = '';
+  let focusTrackingTime = 0;
 
   let homeRowSettleToken = 0;
   let homeMediaSettleToken = 0;
   let universalHomeToken = 0;
   let universalHomeTimer = null;
   let backFocusRestoreToken = 0;
+  let homeRowsDirty = true;
+  let homeRowsObserver = null;
+  let homeRowsObserverRoot = null;
+  let pendingHomeDown = null;
+  let homeDownTimer = null;
+  let homeOrigin = null;
+  let homeReturnPending = false;
+  let homeReturnTimer = null;
+  let homeReturnToken = 0;
 
   let watchlistRow = 0;
   let watchlistCol = 0;
@@ -100,6 +121,7 @@
   let watchlistRowsCache = [];
   let watchlistRowsDirty = true;
   let parentMainTabKey = 'home';
+  let watchlistReturnTabKey = 'home';
 
   // Native Jellyfin library / drawer state
   let drawerStyle = null;
@@ -136,6 +158,7 @@
     const rect = el.getBoundingClientRect();
 
     return (
+      !el.closest('[hidden],[inert],[aria-hidden="true"]') &&
       style.display !== 'none' &&
       style.visibility !== 'hidden' &&
       Number(style.opacity || 1) > 0 &&
@@ -660,6 +683,10 @@
   }
 
   function goUniversalHome() {
+    homeOrigin = null;
+    homeReturnPending = false;
+    homeReturnToken++;
+    clearTimeout(homeReturnTimer);
     hideFocus();
     removePlayerLaunchShield();
     settleUniversalHome();
@@ -672,13 +699,43 @@
     ) {
       consume(event);
 
+      if (
+        backHeld &&
+        event.repeat
+      ) {
+        backRepeatSeen =
+          true;
+
+        if (
+          watchlistLayer() &&
+          !backLongTriggered &&
+          Date.now() -
+            backPressStartedAt >=
+            LONG_PRESS_HOME_MS
+        ) {
+          backLongTriggered =
+            true;
+
+          goUniversalHome();
+        }
+      }
+
       return;
     }
 
     consume(event);
 
-    backHeld = true;
-    backLongTriggered = false;
+    backHeld =
+      true;
+
+    backLongTriggered =
+      false;
+
+    backPressStartedAt =
+      Date.now();
+
+    backRepeatSeen =
+      false;
 
     clearTimeout(
       backLongTimer
@@ -691,7 +748,21 @@
             return;
           }
 
-          backLongTriggered = true;
+          /*
+           * On Watchlist, require evidence that Back is genuinely being held.
+           * Some CEC/remapped remotes deliver a delayed keyup for a tap; using
+           * elapsed time alone made those taps look like long presses and sent
+           * the user Home. A real hold emits repeating keydown events.
+           */
+          if (
+            watchlistLayer() &&
+            !backRepeatSeen
+          ) {
+            return;
+          }
+
+          backLongTriggered =
+            true;
 
           goUniversalHome();
         },
@@ -744,6 +815,8 @@
 
     backHeld = false;
     backLongTriggered = false;
+    backPressStartedAt = 0;
+    backRepeatSeen = false;
 
     if (!wasLong) {
       handleNavigationKeyDown(
@@ -1002,6 +1075,10 @@
 
   function hideFocus() {
     focusRevealToken += 1;
+    focusTarget = null;
+    if (focusTrackingFrame !== null) cancelAnimationFrame(focusTrackingFrame);
+    focusTrackingFrame = null;
+    focusTrackingRect = '';
 
     if (watchlistActionFocus) {
       watchlistActionFocus.classList.remove(
@@ -1241,136 +1318,145 @@
       };
   }
 
-  function showFocusElement(el) {
-    if (
-      !el ||
-      !visible(el)
-    ) {
-      hideFocus();
+  // Track the selected element, not a rectangle captured during page loading.
+  // A single geometry read per frame also catches CSS transforms and sibling
+  // layout shifts, which ResizeObserver on the target alone cannot detect.
+  // No DOM writes occur while stationary. Hidden focus stops the loop entirely.
+  function trackFocus(timestamp) {
+    focusTrackingFrame = null;
+    const el = focusTarget;
+    if (!el || !focusRing) return;
+    if (timestamp - focusTrackingTime >= 16) {
+      focusTrackingTime = timestamp;
+      if (el.isConnected && visible(el)) {
+        const rect = el.getBoundingClientRect();
+        const key = [rect.left, rect.top, rect.width, rect.height].join(':');
+        if (key !== focusTrackingRect || focusRing.style.display === 'none') {
+          const metrics = focusMetrics(el);
+          focusRing.style.width = `${Math.round(metrics.width)}px`;
+          focusRing.style.height = `${Math.round(metrics.height)}px`;
+          focusRing.style.borderRadius = `${Math.round(metrics.radius)}px`;
+          focusRing.style.transform = `translate3d(${Math.round(metrics.left)}px, ${Math.round(metrics.top)}px, 0)`;
+          focusRing.style.display = 'block';
+          focusRing.style.opacity = '1';
+          lastFocusMetrics = metrics;
+          focusTrackingRect = key;
+        }
+      } else {
+        focusRing.style.display = 'none';
+        focusTrackingRect = '';
+        // Existing scoped observers rebuild targets when a control is replaced.
+        // Do not clear logical focus for a temporarily hidden loading control.
+      }
+    }
+    focusTrackingFrame = requestAnimationFrame(trackFocus);
+  }
 
+  function showFocusElement(el) {
+    if (!el) {
+      hideFocus();
       return;
     }
 
     createFocusRing();
+    focusRevealToken++;
 
-    const token =
-      ++focusRevealToken;
+    if (focusArrivalAnimation) {
+      try {
+        focusArrivalAnimation.cancel();
+      } catch (_) {}
 
-    const previousMetrics =
-      lastFocusMetrics
-        ? {
-          left:
-            lastFocusMetrics.left,
+      focusArrivalAnimation =
+        null;
+    }
 
-          top:
-            lastFocusMetrics.top,
+    if (
+      focusTarget !==
+      el
+    ) {
+      focusTrackingRect =
+        '';
+    }
 
-          width:
-            lastFocusMetrics.width,
-
-          height:
-            lastFocusMetrics.height,
-
-          radius:
-            lastFocusMetrics.radius
-        }
-        : null;
+    focusTarget =
+      el;
 
     /*
-     * Wait for Jellyfin's immediate navigation/scroll work, then measure
-     * once. Nearby moves simply relocate the real ring. Far jumps place
-     * that same ring at the destination while hidden and give it one
-     * short arrival glow. There are no temporary focus rectangles.
+     * Put the ring on the new selection synchronously. Waiting until the next
+     * animation frame made rapid D-pad changes repeatedly hide/reset the ring,
+     * which could leave a valid selection temporarily invisible.
      */
-    focusRing.style.display =
-      'block';
+    if (
+      el.isConnected &&
+      visible(
+        el
+      )
+    ) {
+      const rect =
+        el.getBoundingClientRect();
 
-    requestAnimationFrame(
-      () => {
-        requestAnimationFrame(
-          () => {
-            if (
-              token !== focusRevealToken ||
-              !el.isConnected ||
-              !visible(el)
-            ) {
-              return;
-            }
-
-            const metrics =
-              focusMetrics(el);
-
-            const animateArrival =
-              shouldAnimateFarFocus(
-                previousMetrics,
-                metrics
-              );
-
-            if (focusArrivalAnimation) {
-              try {
-                focusArrivalAnimation.cancel();
-              } catch (_) {}
-
-              focusArrivalAnimation =
-                null;
-            }
-
-            if (animateArrival) {
-              focusRing.style.opacity =
-                '0';
-            }
-
-            focusRing.style.width =
-              `${Math.round(
-                metrics.width
-              )}px`;
-
-            focusRing.style.height =
-              `${Math.round(
-                metrics.height
-              )}px`;
-
-            focusRing.style.borderRadius =
-              `${Math.round(
-                metrics.radius
-              )}px`;
-
-            focusRing.style.transform =
-              `translate3d(${Math.round(
-                metrics.left
-              )}px, ${Math.round(
-                metrics.top
-              )}px, 0)`;
-
-            lastFocusMetrics = {
-              left:
-                metrics.left,
-
-              top:
-                metrics.top,
-
-              width:
-                metrics.width,
-
-              height:
-                metrics.height,
-
-              radius:
-                metrics.radius
-            };
-
-            if (animateArrival) {
-              animateFarFocusArrival(
-                token
-              );
-            } else {
-              focusRing.style.opacity =
-                '1';
-            }
-          }
+      const metrics =
+        focusMetrics(
+          el
         );
-      }
-    );
+
+      focusRing.style.width =
+        `${Math.round(
+          metrics.width
+        )}px`;
+
+      focusRing.style.height =
+        `${Math.round(
+          metrics.height
+        )}px`;
+
+      focusRing.style.borderRadius =
+        `${Math.round(
+          metrics.radius
+        )}px`;
+
+      focusRing.style.transform =
+        `translate3d(${Math.round(
+          metrics.left
+        )}px, ${Math.round(
+          metrics.top
+        )}px, 0)`;
+
+      focusRing.style.display =
+        'block';
+
+      focusRing.style.opacity =
+        '1';
+
+      lastFocusMetrics =
+        metrics;
+
+      focusTrackingRect =
+        [
+          rect.left,
+          rect.top,
+          rect.width,
+          rect.height
+        ].join(
+          ':'
+        );
+    } else {
+      focusRing.style.display =
+        'none';
+    }
+
+    focusTrackingTime =
+      -Infinity;
+
+    if (
+      focusTrackingFrame ===
+      null
+    ) {
+      focusTrackingFrame =
+        requestAnimationFrame(
+          trackFocus
+        );
+    }
   }
 
   function showFocus(card) {
@@ -1798,9 +1884,11 @@
     if (!el) {
       return false;
     }
+    if (el.closest('.seerrfin-discover-panel,.seerrfin-filter-host')) return false;
 
     if (
       el.matches(
+        '[aria-controls="app-user-menu"],' +
         '.mainDrawerButton,' +
         '.headerHomeButton,' +
         '.headerBackButton,' +
@@ -1871,6 +1959,7 @@
 
     return [
       'home',
+      'discover',
       'movies',
       'shows',
       'requests'
@@ -2005,11 +2094,13 @@
   }
 
   function rebuildHeaderTargets() {
+    const previous = headerTargets[headerIndex];
     const metrics =
       new Map();
 
     const candidates = [
       ...document.querySelectorAll(
+        '[aria-controls="app-user-menu"],' +
         '.mainDrawerButton,' +
         '.headerHomeButton,' +
         '.headerBackButton,' +
@@ -2071,6 +2162,9 @@
 
       return;
     }
+
+    const preserved = headerTargets.indexOf(previous);
+    if (preserved >= 0) headerIndex = preserved;
 
     headerIndex =
       Math.max(
@@ -2181,6 +2275,9 @@
   function resetTransientNavigationState(
     nextZone = 'route-reset'
   ) {
+    cancelPendingHomeDown();
+    nativeEditingControl = null;
+    homeRowsDirty = true;
     zone =
       nextZone;
 
@@ -2339,9 +2436,46 @@
       return;
     }
 
-    rememberParentMainTab(
-      target
-    );
+    if (
+      target.id ===
+        'jws3-home-tab'
+    ) {
+      const activeBeforeOpen =
+        activeMainTabKey();
+
+      if (
+        activeBeforeOpen &&
+        activeBeforeOpen !==
+          'watchlist'
+      ) {
+        watchlistReturnTabKey =
+          activeBeforeOpen;
+
+        parentMainTabKey =
+          activeBeforeOpen;
+      } else if (
+        parentMainTabKey &&
+        parentMainTabKey !==
+          'watchlist'
+      ) {
+        watchlistReturnTabKey =
+          parentMainTabKey;
+      }
+    } else {
+      const remembered =
+        rememberParentMainTab(
+          target
+        );
+
+      if (
+        remembered &&
+        remembered !==
+          'watchlist'
+      ) {
+        watchlistReturnTabKey =
+          remembered;
+      }
+    }
 
     click(
       target
@@ -2489,10 +2623,21 @@
   }
 
   function rebuildRows() {
+    const previousRow = rows[rowIndex];
+    const previousCard = previousRow?.cards[cardIndex];
     rows =
       buildRowsWithin(
         document
       );
+
+    // Async sections may be inserted before the selected row. Track DOM
+    // identity instead of letting an unchanged numeric index select another row.
+    const preservedRow = rows.findIndex(row => row.container === previousRow?.container);
+    if (preservedRow >= 0) {
+      rowIndex = preservedRow;
+      const preservedCard = rows[rowIndex].cards.indexOf(previousCard);
+      if (preservedCard >= 0) cardIndex = preservedCard;
+    }
 
     if (
       !rows.length
@@ -2526,6 +2671,415 @@
           ].cards.length -
           1
         )
+      );
+  }
+
+  function homeRowsRoot() {
+    const panel = document.querySelector('#homeTab');
+    if (panel && visible(panel)) return panel;
+    const page = activeVisiblePage();
+    return page?.matches('#indexPage,.homePage') && visible(page) ? page : null;
+  }
+
+  function refreshHomeRowsIfNeeded() {
+    const current = rows[rowIndex];
+    if (!homeRowsDirty && current?.container.isConnected &&
+      current.cards[cardIndex]?.isConnected) return;
+    rebuildRows();
+    homeRowsDirty = false;
+  }
+
+  function ensureHomeRowsObserver() {
+    const root = homeRowsRoot();
+    if (root === homeRowsObserverRoot) return;
+    homeRowsObserver?.disconnect();
+    homeRowsObserverRoot = root;
+    homeRowsDirty = true;
+    homeRowsObserver = root ? new MutationObserver(() => {
+      homeRowsDirty = true;
+      scheduleContextRefresh();
+    }) : null;
+    homeRowsObserver?.observe(root, {
+      childList: true, subtree: true, attributes: true,
+      attributeFilter: ['class', 'style', 'hidden', 'aria-hidden']
+    });
+  }
+
+  function cancelPendingHomeDown() {
+    clearTimeout(homeDownTimer);
+    homeDownTimer = null;
+    pendingHomeDown = null;
+  }
+
+  function pendingHomeAnchor(
+    pending
+  ) {
+    if (
+      !pending ||
+      !rows.length
+    ) {
+      return null;
+    }
+
+    let anchor =
+      rows.findIndex(
+        row =>
+          row.container ===
+          pending.container
+      );
+
+    if (
+      anchor >= 0
+    ) {
+      const row =
+        rows[
+          anchor
+        ];
+
+      let card =
+        row.cards.find(
+          candidate =>
+            candidate ===
+            pending.card
+        );
+
+      if (
+        !card &&
+        pending.key
+      ) {
+        card =
+          row.cards.find(
+            candidate =>
+              homeCardKey(
+                candidate
+              ) ===
+              pending.key
+          );
+      }
+
+      if (card) {
+        return {
+          anchor,
+          row,
+          card
+        };
+      }
+    }
+
+    if (
+      pending.key
+    ) {
+      const ordered =
+        rows
+          .map(
+            (
+              row,
+              index
+            ) => ({
+              row,
+              index
+            })
+          )
+          .sort(
+            (a, b) =>
+              Math.abs(
+                a.index -
+                pending.rowIndex
+              ) -
+              Math.abs(
+                b.index -
+                pending.rowIndex
+              )
+          );
+
+      for (
+        const entry of
+        ordered
+      ) {
+        const card =
+          entry.row.cards.find(
+            candidate =>
+              homeCardKey(
+                candidate
+              ) ===
+              pending.key
+          );
+
+        if (card) {
+          return {
+            anchor:
+              entry.index,
+            row:
+              entry.row,
+            card
+          };
+        }
+      }
+    }
+
+    return null;
+  }
+
+  function revealMoreHomeContent(row) {
+    const scroller = getVerticalScrollerForRow(row);
+    if (!scroller) return;
+    const height = scroller === document.scrollingElement ? innerHeight : scroller.clientHeight;
+    const step = Math.max(180, Math.round(height * 0.7));
+    // Native scrolling triggers the loader's IntersectionObserver/scroll
+    // handler. Never call its fetch API or disable lazy loading.
+    scroller.scrollTop = Math.min(
+      Math.max(0, scroller.scrollHeight - height), scroller.scrollTop + step
+    );
+  }
+
+  function resumePendingHomeDown() {
+    const pending =
+      pendingHomeDown;
+
+    homeDownTimer =
+      null;
+
+    if (!pending) {
+      return;
+    }
+
+    if (
+      pending.href !==
+        location.href ||
+      zone !==
+        'library'
+    ) {
+      cancelPendingHomeDown();
+      return;
+    }
+
+    const liveRoot =
+      homeRowsRoot();
+
+    if (
+      !liveRoot ||
+      !liveRoot.isConnected
+    ) {
+      cancelPendingHomeDown();
+      return;
+    }
+
+    /*
+     * Jellyfin can replace the Home root while lazy sections mount. That is
+     * still the same pending Down operation, so follow the new root instead
+     * of treating DOM replacement as a cancellation.
+     */
+    pending.root =
+      liveRoot;
+
+    ensureHomeRowsObserver();
+    refreshHomeRowsIfNeeded();
+
+    const match =
+      pendingHomeAnchor(
+        pending
+      );
+
+    if (
+      match
+    ) {
+      /*
+       * If lazy loading rebuilt the row/card DOM, immediately retarget the
+       * visible ring to the replacement instead of treating that as a cancel.
+       */
+      pending.container =
+        match.row.container;
+
+      pending.card =
+        match.card;
+
+      showFocus(
+        match.card
+      );
+
+      if (
+        match.anchor +
+          1 <
+        rows.length
+      ) {
+        cancelPendingHomeDown();
+
+        selectVerticalRow(
+          match.anchor +
+            1
+        );
+
+        return;
+      }
+    }
+
+    if (
+      Date.now() >=
+      pending.deadline
+    ) {
+      const fallback =
+        match ||
+        (
+          rows.length
+            ? {
+                anchor:
+                  Math.min(
+                    pending.rowIndex,
+                    rows.length -
+                      1
+                  ),
+
+                row:
+                  rows[
+                    Math.min(
+                      pending.rowIndex,
+                      rows.length -
+                        1
+                    )
+                  ]
+              }
+            : null
+        );
+
+      cancelPendingHomeDown();
+
+      if (
+        fallback?.row
+          ?.cards.length
+      ) {
+        selectRow(
+          fallback.anchor,
+          Math.min(
+            pending.col,
+            fallback.row.cards.length -
+              1
+          )
+        );
+      }
+
+      return;
+    }
+
+    /*
+     * The initial native scroll already woke the lazy loader. Do not keep
+     * scrolling on every poll; that can skip past sections while they mount.
+     */
+    homeDownTimer =
+      setTimeout(
+        resumePendingHomeDown,
+        150
+      );
+  }
+
+  function moveHomeDown() {
+    refreshHomeRowsIfNeeded();
+
+    if (
+      pendingHomeDown
+    ) {
+      /*
+       * Rapid Down means "keep going", not "cancel/restart the loader".
+       * Extend the wait and reinforce the same native lazy-load scroll.
+       */
+      pendingHomeDown.deadline =
+        Date.now() +
+        6000;
+
+      const match =
+        pendingHomeAnchor(
+          pendingHomeDown
+        );
+
+      if (
+        match?.card
+      ) {
+        showFocus(
+          match.card
+        );
+      }
+
+      if (
+        homeDownTimer ===
+          null
+      ) {
+        homeDownTimer =
+          setTimeout(
+            resumePendingHomeDown,
+            150
+          );
+      }
+
+      return;
+    }
+
+    const row =
+      rows[
+        rowIndex
+      ];
+
+    if (!row) {
+      return;
+    }
+
+    if (
+      rowIndex +
+        1 <
+      rows.length
+    ) {
+      selectVerticalRow(
+            rowIndex +
+              1
+          );
+
+      return;
+    }
+
+    const root =
+      homeRowsRoot();
+
+    if (!root) {
+      return;
+    }
+
+    const card =
+      row.cards[
+        cardIndex
+      ];
+
+    pendingHomeDown = {
+      root,
+      container:
+        row.container,
+      card,
+      key:
+        homeCardKey(
+          card
+        ),
+      rowIndex,
+      col:
+        cardIndex,
+      href:
+        location.href,
+      deadline:
+        Date.now() +
+        6000
+    };
+
+    /*
+     * Keep the current selection visible while the next Home section mounts.
+     */
+    showFocus(
+      card
+    );
+
+    revealMoreHomeContent(
+      row
+    );
+
+    homeDownTimer =
+      setTimeout(
+        resumePendingHomeDown,
+        150
       );
   }
 
@@ -2703,6 +3257,135 @@
     );
   }
 
+  function horizontalScrollerForRow(
+    row
+  ) {
+    /*
+     * Only real Jellyfin/Seerr media carousels have an emby-scroller.
+     * Logical control rows (Discover Movies / Shows / Settings) deliberately
+     * return null so moving between their buttons cannot scroll the page.
+     */
+    const scroller =
+      row?.scroller;
+
+    return (
+      scroller &&
+      row?.container
+        ?.classList
+        ?.contains(
+          'scrollSlider'
+        )
+    )
+      ? scroller
+      : null;
+  }
+
+  function revealCardHorizontally(
+    row,
+    card
+  ) {
+    const scroller =
+      horizontalScrollerForRow(
+        row
+      );
+
+    if (
+      !scroller ||
+      !card
+    ) {
+      return false;
+    }
+
+    if (
+      cardVisibleInRow(
+        row,
+        card
+      )
+    ) {
+      return true;
+    }
+
+    /*
+     * Jellyfin's Legacy scroller can run in transform mode, where scrollLeft
+     * does not represent the visible carousel position. Use the public
+     * emby-scroller API first; it handles both native and transform modes.
+     */
+    if (
+      typeof scroller.toCenter ===
+      'function'
+    ) {
+      scroller.toCenter(
+        card,
+        true
+      );
+
+      return true;
+    }
+
+    if (
+      typeof scroller.scroller
+        ?.toCenter ===
+      'function'
+    ) {
+      scroller.scroller.toCenter(
+        card,
+        true
+      );
+
+      return true;
+    }
+
+    /*
+     * Browser-test / non-custom-element fallback. Touch only horizontal state.
+     */
+    const viewportRect =
+      scroller
+        .getBoundingClientRect();
+
+    const cardRect =
+      card
+        .getBoundingClientRect();
+
+    let delta =
+      0;
+
+    if (
+      cardRect.left <
+      viewportRect.left +
+        40
+    ) {
+      delta =
+        cardRect.left -
+        (
+          viewportRect.left +
+          40
+        );
+    } else if (
+      cardRect.right >
+      viewportRect.right -
+        40
+    ) {
+      delta =
+        cardRect.right -
+        (
+          viewportRect.right -
+          40
+        );
+    }
+
+    if (
+      Math.abs(
+        delta
+      ) >
+      1
+    ) {
+      scroller.scrollLeft +=
+        delta;
+    }
+
+    return true;
+  }
+
   function pageRow(
     row,
     direction
@@ -2740,7 +3423,7 @@
       cardIndex +
       (
         direction ===
-        'right'
+          'right'
           ? 1
           : -1
       );
@@ -2749,61 +3432,485 @@
       nextIndex <
       0 ||
       nextIndex >=
-      row.cards.length
+        row.cards.length
     ) {
+      if (
+        horizontalScrollerForRow(
+          row
+        )
+      ) {
+        pageRow(
+          row,
+          direction
+        );
+      }
+
       return;
     }
+
+    cardIndex =
+      nextIndex;
 
     const card =
       row.cards[
-        nextIndex
+        cardIndex
+      ];
+
+    revealCardHorizontally(
+      row,
+      card
+    );
+
+    showFocus(
+      card
+    );
+
+    rememberRowNavigation(
+      row,
+      rowIndex,
+      cardIndex
+    );
+
+    /*
+     * Jellyfin may finish a carousel transform on the next frame. Re-target
+     * the same card through the scroller API without touching page scroll.
+     */
+    requestAnimationFrame(
+      () => {
+        if (
+          rows[
+            rowIndex
+          ] === row &&
+          row.cards[
+            cardIndex
+          ] === card
+        ) {
+          revealCardHorizontally(
+            row,
+            card
+          );
+
+          showFocus(
+            card
+          );
+
+          rememberRowNavigation(
+            row,
+            rowIndex,
+            cardIndex
+          );
+        }
+      }
+    );
+  }
+
+  function rowNavigationKey(
+    row,
+    index = rowIndex
+  ) {
+    if (!row) {
+      return '';
+    }
+
+    const container =
+      row.container;
+
+    const section =
+      row.section ||
+      container?.closest?.(
+        '.verticalSection'
+      ) ||
+      null;
+
+    const title =
+      (
+        section?.querySelector?.(
+          '.sectionTitle,' +
+          '.sectionTitleText,' +
+          'h2,' +
+          'h3'
+        )?.textContent ||
+        ''
+      )
+        .replace(
+          /\s+/g,
+          ' '
+        )
+        .trim();
+
+    const identity =
+      section?.id ||
+      container?.id ||
+      section?.dataset?.section ||
+      section?.dataset?.type ||
+      container?.dataset?.section ||
+      container?.dataset?.type ||
+      title ||
+      homeCardKey(
+        row.cards?.[0]
+      ) ||
+      `row-${index}`;
+
+    const route =
+      `${location.pathname || ''}${(location.hash || '').split('?')[0]}`;
+
+    return [
+      route,
+      parentMainTabKey ||
+        '',
+      identity
+    ].join(
+      '::'
+    );
+  }
+
+  function rowScrollPosition(
+    row
+  ) {
+    const scroller =
+      horizontalScrollerForRow(
+        row
+      );
+
+    if (!scroller) {
+      return null;
+    }
+
+    try {
+      if (
+        typeof scroller.getScrollPosition ===
+        'function'
+      ) {
+        const value =
+          scroller.getScrollPosition();
+
+        return Number.isFinite(
+          value
+        )
+          ? value
+          : null;
+      }
+
+      if (
+        typeof scroller.scroller
+          ?.getScrollPosition ===
+        'function'
+      ) {
+        const value =
+          scroller.scroller.getScrollPosition();
+
+        return Number.isFinite(
+          value
+        )
+          ? value
+          : null;
+      }
+    } catch (_) {}
+
+    return Number.isFinite(
+      scroller.scrollLeft
+    )
+      ? scroller.scrollLeft
+      : null;
+  }
+
+  function setRowScrollPosition(
+    row,
+    position
+  ) {
+    const scroller =
+      horizontalScrollerForRow(
+        row
+      );
+
+    if (
+      !scroller ||
+      !Number.isFinite(
+        position
+      )
+    ) {
+      return false;
+    }
+
+    try {
+      if (
+        typeof scroller.scrollToPosition ===
+        'function'
+      ) {
+        scroller.scrollToPosition(
+          position,
+          true
+        );
+
+        return true;
+      }
+
+      if (
+        typeof scroller.scroller
+          ?.slideTo ===
+        'function'
+      ) {
+        scroller.scroller.slideTo(
+          position,
+          true
+        );
+
+        return true;
+      }
+
+      scroller.scrollLeft =
+        position;
+
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function resetRowScrollPosition(
+    row
+  ) {
+    const scroller =
+      horizontalScrollerForRow(
+        row
+      );
+
+    if (!scroller) {
+      return false;
+    }
+
+    try {
+      if (
+        typeof scroller.scrollToBeginning ===
+        'function'
+      ) {
+        scroller.scrollToBeginning();
+        return true;
+      }
+
+      if (
+        typeof scroller.scrollToPosition ===
+        'function'
+      ) {
+        scroller.scrollToPosition(
+          0,
+          true
+        );
+
+        return true;
+      }
+
+      if (
+        typeof scroller.scroller
+          ?.slideTo ===
+        'function'
+      ) {
+        scroller.scroller.slideTo(
+          0,
+          true
+        );
+
+        return true;
+      }
+
+      scroller.scrollLeft =
+        0;
+
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function rememberRowNavigation(
+    row = rows[
+      rowIndex
+    ],
+    index = rowIndex,
+    column = cardIndex
+  ) {
+    if (
+      !row?.cards?.length
+    ) {
+      return;
+    }
+
+    const key =
+      rowNavigationKey(
+        row,
+        index
+      );
+
+    if (!key) {
+      return;
+    }
+
+    const safeColumn =
+      Math.max(
+        0,
+        Math.min(
+          column,
+          row.cards.length -
+            1
+        )
+      );
+
+    rowNavigationMemory.set(
+      key,
+      {
+        cardKey:
+          homeCardKey(
+            row.cards[
+              safeColumn
+            ]
+          ),
+
+        cardIndex:
+          safeColumn,
+
+        scrollPosition:
+          rowScrollPosition(
+            row
+          )
+      }
+    );
+  }
+
+  function selectVerticalRow(
+    newRow,
+    rememberCurrent = true
+  ) {
+    if (
+      !rows.length
+    ) {
+      return false;
+    }
+
+    const targetRowIndex =
+      Math.max(
+        0,
+        Math.min(
+          newRow,
+          rows.length -
+            1
+        )
+      );
+
+    if (
+      rememberCurrent &&
+      rows[
+        rowIndex
+      ] &&
+      targetRowIndex !==
+        rowIndex
+    ) {
+      rememberRowNavigation();
+    }
+
+    const row =
+      rows[
+        targetRowIndex
       ];
 
     if (
-      cardVisibleInRow(
-        row,
-        card
-      )
+      !row?.cards?.length
     ) {
-      cardIndex =
-        nextIndex;
+      return false;
+    }
 
-      showFocus(
-        card
+    const key =
+      rowNavigationKey(
+        row,
+        targetRowIndex
       );
 
-      return;
+    const memory =
+      key
+        ?
+          rowNavigationMemory.get(
+            key
+          )
+        :
+          null;
+
+    let targetCardIndex =
+      0;
+
+    if (memory) {
+      const rememberedByKey =
+        memory.cardKey
+          ?
+            row.cards.findIndex(
+              card =>
+                homeCardKey(
+                  card
+                ) ===
+                memory.cardKey
+            )
+          :
+            -1;
+
+      targetCardIndex =
+        rememberedByKey >=
+          0
+          ?
+            rememberedByKey
+          :
+            Math.max(
+              0,
+              Math.min(
+                memory.cardIndex ||
+                  0,
+                row.cards.length -
+                  1
+              )
+            );
     }
 
+    selectRow(
+      targetRowIndex,
+      targetCardIndex
+    );
+
+    /*
+     * Each media row owns its horizontal history. First entry starts at the
+     * first card / beginning. Revisits restore that row's selected card and
+     * Jellyfin scroller position instead of inheriting the row above.
+     */
     if (
-      !pageRow(
-        row,
-        direction
+      memory &&
+      Number.isFinite(
+        memory.scrollPosition
       )
     ) {
-      return;
+      setRowScrollPosition(
+        row,
+        memory.scrollPosition
+      );
+    } else if (!memory) {
+      resetRowScrollPosition(
+        row
+      );
     }
 
-    setTimeout(
-      () => {
-        cardIndex =
-          nextIndex;
+    const selected =
+      row.cards[
+        targetCardIndex
+      ];
 
-        const live =
-          rows[
-            rowIndex
-          ]?.cards[
-            cardIndex
-          ];
+    if (selected) {
+      showFocus(
+        selected
+      );
+    }
 
-        if (live) {
-          showFocus(
-            live
-          );
-        }
-      },
-      450
+    rememberRowNavigation(
+      row,
+      targetRowIndex,
+      targetCardIndex
     );
+
+    return true;
   }
 
   function selectRow(
@@ -2822,7 +3929,7 @@
         Math.min(
           newRow,
           rows.length -
-          1
+            1
         )
       );
 
@@ -2843,18 +3950,31 @@
         Math.min(
           newCard,
           row.cards.length -
-          1
+            1
         )
       );
 
+    /*
+     * Vertical selection moves only the page/vertical scroller. Horizontal
+     * reveal is then handled inside the row itself. Avoid scrollIntoView()
+     * because browsers may scroll both axes and offset the whole Jellyfin page.
+     */
     ensureRowVisible(
       row
     );
 
-    showFocus(
+    const selected =
       row.cards[
         cardIndex
-      ]
+      ];
+
+    revealCardHorizontally(
+      row,
+      selected
+    );
+
+    showFocus(
+      selected
     );
   }
 
@@ -2868,6 +3988,10 @@
 
     if (!card) {
       return;
+    }
+
+    if (/^#!?\/home(?:[?/?]|$)/i.test(location.hash) && zone === 'library') {
+      captureHomeOrigin(card);
     }
 
     click(
@@ -3469,13 +4593,7 @@
       );
     }
 
-    requestAnimationFrame(
-      () => {
-        showFocusElement(
-          target
-        );
-      }
-    );
+    showFocusElement(target);
 
     return true;
   }
@@ -3501,12 +4619,34 @@
   function moveExt(
     direction
   ) {
-    const next =
+    let next =
       spatialNext(
         direction,
         extTargets,
         extIndex
       );
+
+    // On Details, visit the next vertical band even when Request More is
+    // right-aligned far from Play. Horizontal distance must not skip a section.
+    if (extContext === 'detail' && ['up','down'].includes(direction)) {
+      const from = extTargets[extIndex]?.getBoundingClientRect();
+      if (from) {
+        const candidates = extTargets.map((el,index) => ({ el,index,rect:el.getBoundingClientRect() }))
+          .filter(item => item.index !== extIndex && visible(item.el))
+          .map(item => ({ ...item, gap: direction === 'down' ? item.rect.top - from.bottom : from.top - item.rect.bottom }))
+          .filter(item => item.gap >= -4);
+        if (candidates.length) {
+          const gap = Math.min(...candidates.map(item => item.gap));
+          candidates.sort((a,b) => {
+            const aBand = a.gap <= gap + 24, bBand = b.gap <= gap + 24;
+            if (aBand !== bBand) return aBand ? -1 : 1;
+            return Math.abs(a.rect.left + a.rect.width/2 - (from.left + from.width/2)) -
+              Math.abs(b.rect.left + b.rect.width/2 - (from.left + from.width/2));
+          });
+          next = candidates[0].index;
+        }
+      }
+    }
 
     if (
       next <
@@ -3545,13 +4685,7 @@
       );
     }
 
-    requestAnimationFrame(
-      () => {
-        showFocusElement(
-          target
-        );
-      }
-    );
+    showFocusElement(target);
 
     return true;
   }
@@ -3590,6 +4724,7 @@
     for (
       const selector of
       [
+        '.seerrfin-discover-sections',
         '.seerrfin-movies-sections',
         '.seerrfin-tv-sections',
         '.seerrfin-requests-sections',
@@ -3742,6 +4877,158 @@
     );
   }
 
+  function buildSeerrRows(root) {
+    const mediaRows =
+      buildRowsWithin(
+        root
+      ).sort(
+        (a, b) =>
+          a.container
+            .getBoundingClientRect()
+            .top -
+          b.container
+            .getBoundingClientRect()
+            .top
+      );
+
+    const discoverModes =
+      uniqueVisible([
+        ...root.querySelectorAll(
+          '[data-discover-type]'
+        )
+      ]);
+
+    if (
+      discoverModes.length
+    ) {
+      const settings =
+        uniqueVisible([
+          ...root.querySelectorAll(
+            '[data-filter-open],' +
+            '.seerrfin-filter-heading button'
+          )
+        ]);
+
+      const controls =
+        uniqueVisible([
+          ...discoverModes,
+          ...settings
+        ]).filter(
+          control =>
+            !control.matches?.(
+              '.seerrfin-discover-requests'
+            )
+        );
+
+      const rows = [];
+
+      if (
+        controls.length
+      ) {
+        rows.push({
+          container:
+            root.querySelector(
+              '.seerrfin-discover-panel'
+            ) ||
+            controls[0]
+              .parentElement ||
+            root,
+
+          section:
+            root,
+
+          scroller:
+            null,
+
+          /*
+           * Logical TV row only. Requests remains visible/clickable with a
+           * pointer but is intentionally skipped by D-pad navigation.
+           */
+          cards:
+            controls
+        });
+      }
+
+      rows.push(
+        ...mediaRows
+      );
+
+      return rows;
+    }
+
+    const found =
+      [...mediaRows];
+
+    const groups =
+      new Map();
+
+    for (
+      const control of
+      uniqueVisible([
+        ...root.querySelectorAll(
+          '.seerrfin-discover-panel button,' +
+          '.seerrfin-filter-heading button'
+        )
+      ]).filter(
+        el =>
+          !el.matches?.(
+            '.seerrfin-discover-requests'
+          )
+      )
+    ) {
+      const container =
+        control.parentElement;
+
+      if (
+        !groups.has(
+          container
+        )
+      ) {
+        groups.set(
+          container,
+          []
+        );
+      }
+
+      groups
+        .get(
+          container
+        )
+        .push(
+          control
+        );
+    }
+
+    for (
+      const [
+        container,
+        cards
+      ] of groups
+    ) {
+      found.push({
+        container,
+        section:
+          container,
+        scroller:
+          null,
+        cards:
+          sortVisual(
+            cards
+          )
+      });
+    }
+
+    return found.sort(
+      (a, b) =>
+        a.container
+          .getBoundingClientRect()
+          .top -
+        b.container
+          .getBoundingClientRect()
+          .top
+    );
+  }
+
   function enterSeerrDiscovery() {
     const grid =
       seerrGridRoot();
@@ -3760,7 +5047,7 @@
     }
 
     const found =
-      buildRowsWithin(
+      buildSeerrRows(
         root
       );
 
@@ -4323,38 +5610,97 @@
   }
 
   function restoreAfterWatchlistClose() {
-    watchlistPendingRestore = null;
+    watchlistPendingRestore =
+      null;
 
-    setTimeout(() => {
-      const layer = watchlistLayer();
+    setTimeout(
+      () => {
+        const layer =
+          watchlistLayer();
 
-      if (layer) {
-        enterWatchlistLayer(layer);
-        return;
-      }
+        if (layer) {
+          enterWatchlistLayer(
+            layer
+          );
 
-      resetTransientNavigationState('route-reset');
-
-      const active = document.activeElement;
-
-      if (
-        active instanceof Element &&
-        active.matches('.emby-tab-button') &&
-        visible(active)
-      ) {
-        rebuildHeaderTargets();
-        const index = headerTargets.indexOf(active);
-
-        if (index >= 0) {
-          headerIndex = index;
-          zone = 'header';
-          showFocusElement(active);
           return;
         }
-      }
 
-      resolveContext();
-    },80);
+        const returnKey =
+          (
+            watchlistReturnTabKey &&
+            watchlistReturnTabKey !==
+              'watchlist'
+          )
+            ? watchlistReturnTabKey
+            :
+          (
+            parentMainTabKey &&
+            parentMainTabKey !==
+              'watchlist'
+          )
+            ? parentMainTabKey
+            :
+              'home';
+
+        resetTransientNavigationState(
+          'route-reset'
+        );
+
+        rebuildHeaderTargets();
+
+        const target =
+          mainTabTarget(
+            returnKey
+          );
+
+        if (
+          target &&
+          visible(
+            target
+          )
+        ) {
+          parentMainTabKey =
+            returnKey;
+
+          const index =
+            headerTargets.indexOf(
+              target
+            );
+
+          if (
+            index >= 0
+          ) {
+            headerIndex =
+              index;
+          }
+
+          zone =
+            'header';
+
+          /*
+           * JellyMark restores native tab classes itself, but its saved
+           * lastFocus can be the injected Watchlist tab. Override DOM focus
+           * to the real tab that was active before Watchlist opened.
+           */
+          try {
+            target.focus({
+              preventScroll:
+                true
+            });
+          } catch (_) {}
+
+          showFocusElement(
+            target
+          );
+
+          return;
+        }
+
+        resolveContext();
+      },
+      80
+    );
   }
 
   function closeWatchlistLayer(layer) {
@@ -4474,79 +5820,122 @@
           layer
         );
 
-        setTimeout(
-          () =>
-            focusMainTab(
-              'watchlist',
-              false
-            ),
-          90
-        );
-
         return true;
       }
 
-      const rows =
+      const backRows =
         watchlistRows(
           layer
         );
 
-      const current =
-        rows[
-          Math.max(
-            0,
-            Math.min(
-              watchlistRow,
-              rows.length - 1
-            )
-          )
-        ]?.[
-          Math.max(
-            0,
-            watchlistCol
-          )
-        ];
-
       if (
-        current?.id ===
-          'jws3-home-tab'
+        !backRows.length
       ) {
         return true;
       }
 
-      focusMainTab(
-        'watchlist',
-        false
-      );
+      const mainPosition =
+        watchlistPositionForTarget(
+          backRows,
+          document.getElementById(
+            'jws3-home-tab'
+          )
+        );
 
-      const headerRow =
-        rows.findIndex(
+      const sectionRow =
+        backRows.findIndex(
           row =>
             row.some(
               target =>
-                target.id ===
-                  'jws3-home-tab'
+                target.matches?.(
+                  '.jws3-tab'
+                )
             )
         );
 
+      const current =
+        backRows[
+          watchlistRow
+        ]?.[
+          watchlistCol
+        ];
+
+      const currentIsHeader =
+        !!current &&
+        !!mainPosition &&
+        watchlistRow ===
+          mainPosition.row;
+
+      const currentIsSection =
+        !!current?.matches?.(
+          '.jws3-tab'
+        );
+
+      /*
+       * Short Back stays inside Watchlist:
+       * content/controls -> active sub-tab -> main Watchlist tab -> no-op.
+       * JellyMark keeps the main Watchlist tab active while the overlay is
+       * open. Long Back is handled separately and still goes Universal Home.
+       */
       if (
-        headerRow >= 0
+        current?.id ===
+          'jws3-home-tab'
+      ) {
+        showWatchlistFocus(
+          backRows,
+          layer
+        );
+
+        return true;
+      }
+
+      if (
+        currentIsHeader ||
+        currentIsSection
+      ) {
+        if (mainPosition) {
+          watchlistRow =
+            mainPosition.row;
+
+          watchlistCol =
+            mainPosition.col;
+        }
+      } else if (
+        sectionRow >=
+          0
       ) {
         watchlistRow =
-          headerRow;
+          sectionRow;
+
+        const activeCol =
+          backRows[
+            sectionRow
+          ].findIndex(
+            target =>
+              target.getAttribute?.(
+                'aria-pressed'
+              ) ===
+                'true'
+          );
 
         watchlistCol =
-          Math.max(
-            0,
-            rows[
-              headerRow
-            ].findIndex(
-              target =>
-                target.id ===
-                  'jws3-home-tab'
-            )
-          );
+          activeCol >= 0
+            ? activeCol
+            : 0;
+      } else if (
+        mainPosition
+      ) {
+        watchlistRow =
+          mainPosition.row;
+
+        watchlistCol =
+          mainPosition.col;
       }
+
+      showWatchlistFocus(
+        backRows,
+        layer
+      );
 
       return true;
     }
@@ -4731,50 +6120,203 @@
   function enhancedPrimaryTargets(
     root
   ) {
-    if (!root) {
-      return [];
-    }
-
-    const request =
-      root.querySelector(
-        '.jellyseerr-request-button:not([disabled]),' +
-        '.jellyseerr-button-request:not([disabled])'
-      );
-
-    const refresh = [
-      ...root.querySelectorAll(
-        'button,' +
-        '[role="button"]'
-      )
-    ].find(
-      el =>
-        visible(
-          el
-        ) &&
-        /refresh|reload/i.test(
-          textOf(
-            el
-          )
-        )
-    );
-
-    const close =
-      root.querySelector(
-        '.modal-close,' +
-        '[aria-label="Close"],' +
-        '[title="Close"]'
-      );
-
-    return uniqueVisible([
-      request,
-      refresh,
-      close
-    ]);
+    return uiControlTargets(root);
   }
 
-  // ============================================================
-  // REQUEST FORMS
-  // ============================================================
+  function enhancedPopupRows(
+    root
+  ) {
+    return watchlistVisualRows(
+      enhancedPrimaryTargets(
+        root
+      )
+    );
+  }
+
+  function moveEnhancedPopup(
+    direction,
+    root
+  ) {
+    const previous =
+      extTargets[
+        extIndex
+      ];
+
+    const targets =
+      enhancedPrimaryTargets(
+        root
+      );
+
+    extContext =
+      'enhanced-modal';
+
+    extRoot =
+      root;
+
+    extTargets =
+      targets;
+
+    if (
+      !targets.length
+    ) {
+      extIndex =
+        0;
+
+      hideFocus();
+      return false;
+    }
+
+    let current =
+      previous &&
+      targets.includes(
+        previous
+      )
+        ? previous
+        :
+          targets.find(
+            target =>
+              target.matches?.(
+                '.jellyseerr-request-button:not([disabled]),' +
+                '.jellyseerr-modal-button-primary:not([disabled])'
+              )
+          ) ||
+          targets[0];
+
+    const visualRows =
+      watchlistVisualRows(
+        targets
+      );
+
+    let position =
+      watchlistPositionForTarget(
+        visualRows,
+        current
+      ) || {
+        row:
+          0,
+        col:
+          0
+      };
+
+    if (
+      direction ===
+        'left' ||
+      direction ===
+        'right'
+    ) {
+      position.col =
+        Math.max(
+          0,
+          Math.min(
+            visualRows[
+              position.row
+            ].length -
+              1,
+            position.col +
+              (
+                direction ===
+                  'right'
+                  ? 1
+                  : -1
+              )
+          )
+        );
+    } else {
+      const currentRect =
+        visualRows[
+          position.row
+        ][
+          position.col
+        ].getBoundingClientRect();
+
+      const currentX =
+        currentRect.left +
+        currentRect.width /
+          2;
+
+      const nextRow =
+        position.row +
+        (
+          direction ===
+            'down'
+            ? 1
+            : -1
+        );
+
+      if (
+        nextRow >= 0 &&
+        nextRow <
+          visualRows.length
+      ) {
+        position.row =
+          nextRow;
+
+        let bestCol =
+          0;
+
+        let bestDistance =
+          Infinity;
+
+        visualRows[
+          nextRow
+        ].forEach(
+          (
+            target,
+            index
+          ) => {
+            const rect =
+              target
+                .getBoundingClientRect();
+
+            const distance =
+              Math.abs(
+                rect.left +
+                rect.width /
+                  2 -
+                currentX
+              );
+
+            if (
+              distance <
+              bestDistance
+            ) {
+              bestDistance =
+                distance;
+
+              bestCol =
+                index;
+            }
+          }
+        );
+
+        position.col =
+          bestCol;
+      }
+    }
+
+    current =
+      visualRows[
+        position.row
+      ][
+        position.col
+      ];
+
+    extIndex =
+      targets.indexOf(
+        current
+      );
+
+    scrollModalTarget(
+      current,
+      root
+    );
+
+    showFocusElement(
+      current
+    );
+
+    return true;
+  }
 
   function looksLikeRequestForm(
     root
@@ -4832,6 +6374,7 @@
 
     const candidates = [
       ...document.querySelectorAll(
+        '.jellyseerr-season-modal,' +
         '[role="dialog"],' +
         '.modal-overlay,' +
         '.modal-container,' +
@@ -5264,14 +6807,11 @@
               exact
             )
           :
-            -1;
-
-      if (
-        next <
-        0
-      ) {
-        return false;
-      }
+            spatialNext(
+              direction,
+              extTargets,
+              extIndex
+            );
     } else {
       next =
         spatialNext(
@@ -5301,13 +6841,7 @@
       extRoot
     );
 
-    requestAnimationFrame(
-      () => {
-        showFocusElement(
-          target
-        );
-      }
-    );
+    showFocusElement(target);
 
     return true;
   }
@@ -5437,6 +6971,34 @@
       selectMode =
         null;
 
+      return false;
+    }
+
+    if (select.multiple) {
+      const state = selectMode;
+      if (state.cursor === undefined) state.cursor = Math.max(0, select.selectedIndex);
+      if (isBackKey(event.key)) {
+        consume(event);
+        selectMode = null;
+        showFocusElement(state.visualTarget);
+        return true;
+      }
+      if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Enter',' '].includes(event.key)) {
+        consume(event);
+        if (event.key === 'Enter' || event.key === ' ') {
+          const option = select.options[state.cursor];
+          if (option && !option.disabled) { option.selected = !option.selected; dispatchValueEvents(select); }
+        } else {
+          const delta = ['ArrowUp','ArrowLeft'].includes(event.key) ? -1 : 1;
+          let next = state.cursor + delta;
+          while (next >= 0 && next < select.options.length && select.options[next].disabled) next += delta;
+          if (next >= 0 && next < select.options.length) state.cursor = next;
+        }
+        const option = select.options[state.cursor];
+        option?.scrollIntoView({ block: 'nearest' });
+        showFocusElement(option || state.visualTarget);
+        return true;
+      }
       return false;
     }
 
@@ -5613,6 +7175,7 @@
   ) {
     const close =
       root?.querySelector(
+        'button[data-filter-close],button[data-profile-close],[data-app-close],' +
         '.bst-quality-close,' +
         '.bst-modal-close,' +
         '.modal-close,' +
@@ -5622,13 +7185,16 @@
         '[title="Close"]'
       );
 
-    return (
-      close
-        ? click(
-            close
-          )
-        : false
-    );
+    if (close) return click(close);
+    const backdrop = root?.closest('.MuiModal-root')?.querySelector('.MuiBackdrop-root');
+    if (backdrop) return click(backdrop);
+    if (root?.matches('[role="dialog"],[role="menu"],[role="listbox"]')) {
+      const escape = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+      Object.defineProperty(escape, '__jellynavNative', { value: true });
+      root.dispatchEvent(escape);
+      return true;
+    }
+    return false;
   }
 
   // ============================================================
@@ -5657,6 +7223,9 @@
 
         ...root.querySelectorAll(
           '.je-series-request-more-btn'
+          + ',#childrenCollapsible button,#childrenCollapsible select'
+          + ',#listChildrenCollapsible button,#listChildrenCollapsible select'
+          + ',.detailPageContent .sectionTitleContainer a'
         )
       ])
     );
@@ -5668,6 +7237,8 @@
     return uniqueVisible([
       ...root.querySelectorAll(
         '#childrenCollapsible .card[data-type],' +
+        '#listChildrenCollapsible .card[data-type],' +
+        '#listChildrenCollapsible .listItem[data-type="Season"],' +
         '#listChildrenCollapsible .listItem[data-type="Episode"],' +
         '.moreFromSeasonSection .card[data-type="Episode"],' +
         '.nextUpSection .card[data-type],' +
@@ -5736,13 +7307,7 @@
       target
     );
 
-    requestAnimationFrame(
-      () => {
-        showFocusElement(
-          target
-        );
-      }
-    );
+    showFocusElement(target);
 
     return true;
   }
@@ -5850,6 +7415,7 @@
   }
 
   function searchPageRoot() {
+    if (document.body.classList.contains('dashboardDocument') || /\/(?:mypreferences|userprofile|configuration|plugins|users|devices)/i.test(location.hash)) return null;
     const input =
       searchInput();
 
@@ -5900,7 +7466,7 @@
     );
   }
 
-  function setSearchInputValue(
+  function writeInputValue(
     input,
     value
   ) {
@@ -5911,8 +7477,12 @@
     const descriptor =
       Object
         .getOwnPropertyDescriptor(
-          HTMLInputElement
-            .prototype,
+          (
+            input.tagName ===
+              'TEXTAREA'
+              ? HTMLTextAreaElement
+              : HTMLInputElement
+          ).prototype,
           'value'
         );
 
@@ -5927,6 +7497,21 @@
       input.value =
         value;
     }
+  }
+
+  function setSearchInputValue(
+    input,
+    value,
+    dispatchChange = true
+  ) {
+    if (!input) {
+      return;
+    }
+
+    writeInputValue(
+      input,
+      value
+    );
 
     input.dispatchEvent(
       new Event(
@@ -5938,15 +7523,53 @@
       )
     );
 
-    input.dispatchEvent(
-      new Event(
-        'change',
-        {
-          bubbles:
-            true
-        }
-      )
-    );
+    if (
+      dispatchChange
+    ) {
+      input.dispatchEvent(
+        new Event(
+          'change',
+          {
+            bubbles:
+              true
+          }
+        )
+      );
+    }
+  }
+
+  function setKeyboardValue(
+    value
+  ) {
+    keyboardValue =
+      String(
+        value ?? ''
+      );
+
+    const input =
+      keyboardInput;
+
+    if (
+      !input
+    ) {
+      updateKeyboardPreview();
+      return;
+    }
+
+    if (
+      !keyboardLiveSearch
+    ) {
+      /*
+       * Form/watchlist text fields keep their existing live editing behavior.
+       * Jellyfin Search is different: it stays fully local until SEARCH.
+       */
+      setSearchInputValue(
+        input,
+        keyboardValue
+      );
+    }
+
+    updateKeyboardPreview();
   }
 
   function submitSearch(
@@ -6065,7 +7688,7 @@
 
     if (preview) {
       preview.textContent =
-        keyboardInput?.value ||
+        keyboardValue ||
         'Search';
     }
   }
@@ -6090,6 +7713,41 @@
     const input =
       keyboardInput;
 
+    const formContext =
+      keyboardFormContext;
+
+    const liveSearch =
+      keyboardLiveSearch;
+
+    const watchlistInput =
+      input?.closest?.(
+        '#jws3-overlay,' +
+        '.jws3-dialog'
+      );
+
+    if (
+      liveSearch &&
+      submit &&
+      input
+    ) {
+      /*
+       * Search typing is isolated from Jellyfin until the explicit SEARCH
+       * button. Commit the complete query exactly once here.
+       */
+      setSearchInputValue(
+        input,
+        keyboardValue,
+        true
+      );
+    }
+
+    clearTimeout(
+      keyboardSearchTimer
+    );
+
+    keyboardSearchTimer =
+      null;
+
     keyboardRoot
       ?.remove();
 
@@ -6099,24 +7757,36 @@
     keyboardInput =
       null;
 
+    keyboardFormContext =
+      false;
+
+    keyboardLiveSearch =
+      false;
+
+    keyboardValue =
+      '';
+
     keyboardRow =
       0;
 
     keyboardColumn =
       0;
 
-    const watchlistInput =
-      input?.closest?.(
-        '#jws3-overlay,' +
-        '.jws3-dialog'
-      );
-
     if (
       submit &&
       input
     ) {
-      if (watchlistInput) {
+      if (
+        watchlistInput ||
+        formContext
+      ) {
         dispatchValueEvents(
+          input
+        );
+      } else if (
+        liveSearch
+      ) {
+        submitSearch(
           input
         );
       } else {
@@ -6128,6 +7798,31 @@
 
     setTimeout(
       () => {
+        if (formContext) {
+          resolveContext();
+          const index =
+            extTargets.indexOf(
+              input
+            );
+
+          if (
+            index >= 0
+          ) {
+            extIndex =
+              index;
+          }
+
+          if (
+            input?.isConnected
+          ) {
+            showFocusElement(
+              input
+            );
+          }
+
+          return;
+        }
+
         if (
           input &&
           watchlistInput &&
@@ -6148,17 +7843,22 @@
           }
         }
 
+        const liveInput =
+          input?.isConnected
+            ? input
+            : searchInput();
+
         if (
-          input &&
+          liveInput &&
           visible(
-            input
+            liveInput
           )
         ) {
           zone =
             'search';
 
           scrollSearchToTop(
-            input,
+            liveInput,
             searchPageRoot()
           );
         } else {
@@ -6172,10 +7872,10 @@
   function applyKeyboardKey(
     key
   ) {
-    const input =
-      keyboardInput;
-
-    if (!input) {
+    if (
+      !keyboardInput &&
+      !keyboardLiveSearch
+    ) {
       return;
     }
 
@@ -6194,12 +7894,9 @@
       key ===
       'CLEAR'
     ) {
-      setSearchInputValue(
-        input,
+      setKeyboardValue(
         ''
       );
-
-      updateKeyboardPreview();
 
       return;
     }
@@ -6208,12 +7905,9 @@
       key ===
       'SPACE'
     ) {
-      setSearchInputValue(
-        input,
-        `${input.value} `
+      setKeyboardValue(
+        `${keyboardValue} `
       );
-
-      updateKeyboardPreview();
 
       return;
     }
@@ -6224,27 +7918,21 @@
     ) {
       const characters =
         Array.from(
-          input.value
+          keyboardValue
         );
 
       characters.pop();
 
-      setSearchInputValue(
-        input,
+      setKeyboardValue(
         characters.join('')
       );
-
-      updateKeyboardPreview();
 
       return;
     }
 
-    setSearchInputValue(
-      input,
-      `${input.value}${key.toLowerCase()}`
+    setKeyboardValue(
+      `${keyboardValue}${key.toLowerCase()}`
     );
-
-    updateKeyboardPreview();
   }
 
   function openKeyboard(
@@ -6259,6 +7947,48 @@
 
     keyboardInput =
       input;
+
+    keyboardFormContext =
+      [
+        'settings',
+        'native-dialog',
+        'request-form'
+      ].includes(
+        extContext
+      );
+
+    const watchlistInput =
+      !!input.closest?.(
+        '#jws3-overlay,' +
+        '.jws3-dialog'
+      );
+
+    keyboardLiveSearch =
+      !keyboardFormContext &&
+      !watchlistInput &&
+      (
+        input ===
+          searchInput() ||
+        input.matches?.(
+          'input[type="search"],' +
+          'input.searchInput,' +
+          'input.txtSearch'
+        ) ||
+        !!input.closest?.(
+          '.searchFields'
+        )
+      );
+
+    keyboardValue =
+      input.value ||
+      '';
+
+    clearTimeout(
+      keyboardSearchTimer
+    );
+
+    keyboardSearchTimer =
+      null;
 
     keyboardRoot =
       document.createElement(
@@ -6285,7 +8015,7 @@
       'jfTvKeyboardPreview';
 
     preview.textContent =
-      input.value ||
+      keyboardValue ||
       'Search';
 
     panel.appendChild(
@@ -6319,7 +8049,11 @@
               'button';
 
             button.textContent =
-              key;
+              key ===
+                'SEARCH' &&
+              keyboardFormContext
+                ? 'DONE'
+                : key;
 
             button.dataset.key =
               key;
@@ -6750,19 +8484,9 @@
             root
           );
         } else {
-          selectRow(
+          selectVerticalRow(
             rowIndex -
-            1,
-
-            Math.min(
-              cardIndex,
-
-              rows[
-                rowIndex -
-                1
-              ].cards.length -
               1
-            )
           );
         }
 
@@ -6782,19 +8506,9 @@
           rows.length -
           1
         ) {
-          selectRow(
+          selectVerticalRow(
             rowIndex +
-            1,
-
-            Math.min(
-              cardIndex,
-
-              rows[
-                rowIndex +
-                1
-              ].cards.length -
               1
-            )
           );
         }
 
@@ -7632,6 +9346,12 @@
   function restoreParentMainTabAfterBackNavigation(
     departingRoot
   ) {
+    if (homeOrigin) {
+      homeReturnPending = true;
+      // The route handler restores once Home is mounted. Never move its tab
+      // or scroll position while the departing details page is fading out.
+      return;
+    }
     const token =
       ++backFocusRestoreToken;
 
@@ -8563,22 +10283,61 @@
       target.getBoundingClientRect();
 
     if (
-      rect.top >= 115 &&
+      rect.top >=
+        115 &&
       rect.bottom <=
-        innerHeight - 70
+        innerHeight -
+          70
     ) {
       return;
     }
 
-    try {
-      target.scrollIntoView({
-        behavior: 'auto',
-        block: 'center',
-        inline: 'nearest'
-      });
-    } catch (_) {
-      target.scrollIntoView(false);
-    }
+    /*
+     * Native library grid movement is vertical. Adjust only the vertical
+     * scroll owner so a column move can never shift the page horizontally.
+     */
+    const scroller =
+      nearestScrollableAncestor(
+        target,
+        nativeLibraryRoot
+      ) ||
+      document.scrollingElement ||
+      document.documentElement;
+
+    const viewport =
+      (
+        scroller ===
+          document.scrollingElement ||
+        scroller ===
+          document.documentElement ||
+        scroller ===
+          document.body
+      )
+        ? {
+            top:
+              0,
+            bottom:
+              innerHeight,
+            height:
+              innerHeight
+          }
+        :
+          scroller
+            .getBoundingClientRect();
+
+    const targetCenter =
+      rect.top +
+      rect.height /
+        2;
+
+    const viewportCenter =
+      viewport.top +
+      viewport.height /
+        2;
+
+    scroller.scrollTop +=
+      targetCenter -
+      viewportCenter;
   }
 
   function showNativeCardFocus() {
@@ -8900,7 +10659,10 @@
       parentMainTabKey =
         'home';
 
-      goUniversalHome();
+      if (homeOrigin) {
+        homeReturnPending = true;
+        history.back();
+      } else goUniversalHome();
 
       return true;
     }
@@ -9532,13 +11294,7 @@
       root
     );
 
-    requestAnimationFrame(
-      () => {
-        showFocusElement(
-          target
-        );
-      }
-    );
+    showFocusElement(target);
 
     return true;
   }
@@ -9550,7 +11306,7 @@
         '.dialogContainer .formDialog,' +
         '.actionSheet,' +
         '.selectionCommandsPanel,' +
-        '.promptDialog'
+        '.promptDialog,[role="dialog"],[role="menu"],[role="listbox"]'
       )
     ].find(
       root =>
@@ -9572,29 +11328,81 @@
   function nativeDialogTargets(
     root
   ) {
-    if (!root) {
-      return [];
-    }
+    return uiControlTargets(root);
+  }
 
-    return sortVisual(
-      uniqueVisible([
-        ...root.querySelectorAll(
-          'button:not([disabled]),' +
-          'a[href],' +
-          '[role="button"]:not([aria-disabled="true"]),' +
-          '[role="option"]:not([aria-disabled="true"]),' +
-          'input:not([type="hidden"]):not([disabled]),' +
-          'select:not([disabled]),' +
-          'textarea:not([disabled]),' +
-          '[tabindex]:not([tabindex="-1"])'
-        )
-      ]).filter(
-        el =>
-          !el.closest(
-            '[aria-hidden="true"]'
-          )
-      )
-    );
+  // Native Jellyfin, React/MUI and plugin forms share these semantics.
+  // Keep only actionable leaves; nested icons/text must not become stops.
+  function uiControlTargets(root) {
+    if (!root) return [];
+    const controls = [...root.querySelectorAll(
+      'button,a[href],input:not([type="hidden"]),select,textarea,summary,' +
+      '[role="button"],[role="tab"],[role="menuitem"],[role="menuitemcheckbox"],' +
+      '[role="menuitemradio"],[role="option"],[role="checkbox"],[role="switch"],' +
+      '[role="combobox"],[role="slider"],label'
+    )];
+    return sortVisual(uniqueVisible(controls.filter(el => {
+      if (el.disabled || el.matches(':disabled') || el.closest('[hidden],[inert],[aria-hidden="true"],[aria-disabled="true"]')) return false;
+      if (el.matches('label')) {
+        const input = el.control || el.querySelector('input');
+        return input && !input.disabled && !visible(input);
+      }
+      return !controls.some(parent => parent !== el && parent.contains(el) &&
+        parent.matches('button,a[href],[role="button"],[role="menuitem"],[role="option"]'));
+    })));
+  }
+
+  function activateUiControl(target) {
+    const control = target?.control || underlyingControl(target);
+    if (control?.tagName === 'SELECT') {
+      return enterSelectMode(control, target);
+    }
+    if (control?.matches?.('input[type="date"],input[type="time"],input[type="datetime-local"],input[type="month"],input[type="week"],input[type="number"]')) {
+      control.focus();
+      nativeEditingControl = control;
+      return true;
+    }
+    if (control?.matches?.('textarea,input:not([type="checkbox"]):not([type="radio"]):not([type="button"]):not([type="submit"]):not([type="range"])')) {
+      openKeyboard(control);
+      return true;
+    }
+    return click(target);
+  }
+
+  function settingsPageRoot() {
+    if (/^#!?\/home(?:[?/?]|$)/i.test(location.hash)) return null;
+    if (document.body.classList.contains('dashboardDocument')) return document.body;
+    const page = activeVisiblePage();
+    if (/\/(?:dashboard|mypreferences|myprofile|userprofile|display|home|playback|subtitles|quickconnect|configuration|plugins|users|devices|scheduledtasks|networking|branding|api|metadata)/i.test(location.hash) && !/^#!?\/home(?:[?/?]|$)/i.test(location.hash)) {
+      return page || document.querySelector('main,[role="main"]');
+    }
+    // Legacy settings/plugin pages expose forms even when their route is custom.
+    if (page && !page.matches('#indexPage,.homePage') && page.querySelector('form')) return page;
+    return document.querySelector('main,[role="main"]');
+  }
+
+  function handleSettings(event, root) {
+    if (isBackKey(event.key)) {
+      consume(event);
+      history.back();
+      return true;
+    }
+    if (!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Enter',' '].includes(event.key)) return false;
+    consume(event);
+    setExt('settings', root, settingsControlTargets(root));
+    if (event.key === 'Enter' || event.key === ' ') return activateUiControl(extTargets[extIndex]);
+    const control = underlyingControl(extTargets[extIndex]);
+    if (control?.matches?.('input[type="range"]') && ['ArrowLeft','ArrowRight'].includes(event.key)) {
+      if (event.key === 'ArrowLeft') control.stepDown(); else control.stepUp();
+      dispatchValueEvents(control);
+      return true;
+    }
+    return moveExt(event.key.slice(5).toLowerCase());
+  }
+
+  function settingsControlTargets(root) {
+    rebuildHeaderTargets();
+    return sortVisual(uniqueVisible([...headerTargets, ...uiControlTargets(root)]));
   }
 
   function enterNativeDialog(
@@ -9688,17 +11496,7 @@
       event
     );
 
-    if (
-      !extTargetsStillValid(
-        root
-      ) ||
-      extContext !==
-      'native-dialog'
-    ) {
-      enterNativeDialog(
-        root
-      );
-    }
+    enterNativeDialog(root);
 
     if (
       event.key ===
@@ -9706,11 +11504,7 @@
       event.key ===
       ' '
     ) {
-      click(
-        extTargets[
-          extIndex
-        ]
-      );
+      activateUiControl(extTargets[extIndex]);
 
       setTimeout(
         resolveContext,
@@ -9720,6 +11514,12 @@
       return true;
     }
 
+    const control = underlyingControl(extTargets[extIndex]);
+    if (control?.matches?.('input[type="range"]') && ['ArrowLeft','ArrowRight'].includes(event.key)) {
+      if (event.key === 'ArrowLeft') control.stepDown(); else control.stepUp();
+      dispatchValueEvents(control);
+      return true;
+    }
     moveExt(
       event.key
         .replace(
@@ -9910,6 +11710,7 @@
       setTimeout(
         () => {
           ensureMediaObserver();
+          ensureHomeRowsObserver();
           const pauseOverlay = document.querySelector('#pause-screen-overlay');
           if (pauseOverlay !== pauseScreenObserverRoot) {
             pauseScreenObserver?.disconnect();
@@ -9963,6 +11764,16 @@
            * pages). Always re-resolve instead of waiting for D-pad input.
            */
           resolveContext();
+          if ((!focusTarget || !focusTarget.isConnected) && !pendingHomeDown && !homeReturnPending) {
+            if (zone === 'header') {
+              rebuildHeaderTargets();
+              showFocusElement(headerTargets[headerIndex]);
+            } else if (zone === 'library') {
+              rebuildRows();
+              if (rows.length) selectRow(rowIndex, cardIndex);
+              else enterHeader(true);
+            } else if (zone === 'seerr-library') enterSeerrDiscovery();
+          }
         },
         delay
       );
@@ -10132,6 +11943,7 @@
 
     homeMediaSettleToken++;
     homeRowSettleToken++;
+    if (homeOrigin && location.href === homeOrigin.url && lastLocationKey !== location.href) homeReturnPending = true;
     watchlistRowsDirty =
       true;
     lastLocationKey =
@@ -10165,7 +11977,336 @@
     return true;
   }
 
+  function homeCardKey(card) {
+    return card?.getAttribute?.('data-id') || card?.querySelector?.('a[href]')?.getAttribute('href') || card?.id || '';
+  }
+
+  function captureHomeOrigin(card) {
+    const row =
+      rows[
+        rowIndex
+      ];
+
+    const vertical =
+      getVerticalScrollerForRow(
+        row
+      );
+
+    const horizontal =
+      horizontalScrollerForRow(
+        row
+      );
+
+    homeOrigin = {
+      url:
+        location.href,
+
+      card,
+
+      key:
+        homeCardKey(
+          card
+        ),
+
+      rowIndex,
+      cardIndex,
+
+      container:
+        row?.container ||
+        null,
+
+      vertical: {
+        node:
+          vertical ||
+          null,
+
+        id:
+          vertical?.id ||
+          null,
+
+        top:
+          vertical?.scrollTop ||
+          0
+      },
+
+      horizontal: {
+        node:
+          horizontal ||
+          null,
+
+        id:
+          horizontal?.id ||
+          null,
+
+        left:
+          horizontal?.scrollLeft ||
+          0
+      }
+    };
+  }
+
+  function restoreHomeOrigin() {
+    clearTimeout(
+      homeReturnTimer
+    );
+
+    homeReturnTimer =
+      null;
+
+    const token =
+      ++homeReturnToken;
+
+    const saved =
+      homeOrigin;
+
+    homeMediaSettleToken++;
+    homeRowSettleToken++;
+
+    const settle =
+      attempt => {
+        homeReturnTimer =
+          null;
+
+        if (
+          token !==
+            homeReturnToken ||
+          !homeReturnPending ||
+          !saved ||
+          location.href !==
+            saved.url
+        ) {
+          return;
+        }
+
+        if (
+          !detailRoot() &&
+          homeRowsRoot()
+        ) {
+          rebuildRows();
+
+          let ri =
+            rows.findIndex(
+              row =>
+                row.cards.includes(
+                  saved.card
+                )
+            );
+
+          let ci =
+            ri >= 0
+              ? rows[
+                  ri
+                ].cards.indexOf(
+                  saved.card
+                )
+              : -1;
+
+          if (
+            ri < 0 &&
+            saved.key
+          ) {
+            const ordered =
+              rows
+                .map(
+                  (
+                    row,
+                    index
+                  ) => ({
+                    row,
+                    index
+                  })
+                )
+                .sort(
+                  (a, b) =>
+                    Math.abs(
+                      a.index -
+                      saved.rowIndex
+                    ) -
+                    Math.abs(
+                      b.index -
+                      saved.rowIndex
+                    )
+                );
+
+            for (
+              const {
+                row,
+                index
+              } of ordered
+            ) {
+              ci =
+                row.cards.findIndex(
+                  card =>
+                    homeCardKey(
+                      card
+                    ) ===
+                    saved.key
+                );
+
+              if (
+                ci >= 0
+              ) {
+                ri =
+                  index;
+                break;
+              }
+            }
+          }
+
+          if (
+            ri >= 0 ||
+            (
+              attempt >=
+                60 &&
+              rows.length
+            )
+          ) {
+            ri =
+              ri >= 0
+                ? ri
+                : Math.min(
+                    saved.rowIndex,
+                    rows.length -
+                      1
+                  );
+
+            const row =
+              rows[
+                ri
+              ];
+
+            ci =
+              ci >= 0
+                ? ci
+                : Math.min(
+                    saved.cardIndex,
+                    row.cards.length -
+                      1
+                  );
+
+            rowIndex =
+              ri;
+
+            cardIndex =
+              ci;
+
+            homeReturnPending =
+              false;
+
+            zone =
+              'library';
+
+            /*
+             * Restore scroll positions exactly once, after the Home target
+             * exists. Replaying window/ancestor scroll every 100 ms fought
+             * Jellyfin's own lazy layout and could leave Home offset or partial.
+             */
+            const vertical =
+              saved.vertical
+                ?.node
+                ?.isConnected
+                  ? saved.vertical
+                      .node
+                  :
+                    saved.vertical
+                      ?.id
+                      ? document
+                          .getElementById(
+                            saved.vertical
+                              .id
+                          )
+                      :
+                        getVerticalScrollerForRow(
+                          row
+                        );
+
+            const horizontal =
+              saved.horizontal
+                ?.node
+                ?.isConnected
+                  ? saved.horizontal
+                      .node
+                  :
+                    saved.horizontal
+                      ?.id
+                      ? document
+                          .getElementById(
+                            saved.horizontal
+                              .id
+                          )
+                      :
+                        horizontalScrollerForRow(
+                          row
+                        );
+
+            if (
+              vertical &&
+              saved.vertical
+            ) {
+              vertical.scrollTop =
+                saved.vertical.top;
+            }
+
+            if (
+              horizontal &&
+              saved.horizontal
+            ) {
+              horizontal.scrollLeft =
+                saved.horizontal.left;
+            }
+
+            ensureRowVisible(
+              row
+            );
+
+            const card =
+              row.cards[
+                cardIndex
+              ];
+
+            revealCardHorizontally(
+              row,
+              card
+            );
+
+            showFocus(
+              card
+            );
+
+            return;
+          }
+        }
+
+        if (
+          attempt <
+          60
+        ) {
+          homeReturnTimer =
+            setTimeout(
+              () =>
+                settle(
+                  attempt +
+                    1
+                ),
+              100
+            );
+        } else {
+          homeReturnPending =
+            false;
+
+          enterHeader(
+            true
+          );
+        }
+      };
+
+    settle(0);
+
+    return true;
+  }
+
   function beginHomePreferredFocus() {
+    if (homeReturnPending && homeOrigin) return homeReturnTimer !== null || restoreHomeOrigin();
     const token =
       ++homeMediaSettleToken;
 
@@ -10353,8 +12494,6 @@
       watchlistLayer();
 
     if (watchlist) {
-      parentMainTabKey =
-        'watchlist';
       if (
         zone !==
           watchlist.type ||
@@ -10370,6 +12509,12 @@
       }
 
       return watchlist;
+    }
+
+    const pluginForm = [...document.querySelectorAll('.seerrfin-filter-panel,.seerrfin-profile-panel,.seerrfin-app-panel,[role="menu"],[role="listbox"]')].filter(visible).pop();
+    if (pluginForm && !keyboardRoot) {
+      enterNativeDialog(pluginForm);
+      return { type: 'native-dialog', root: pluginForm };
     }
 
     const request =
@@ -10457,13 +12602,7 @@
       zone =
         'enhanced-modal';
 
-      if (
-        !extTargetsStillValid(
-          enhanced
-        ) ||
-        extContext !==
-        'enhanced-modal'
-      ) {
+      {
         const targets =
           enhancedPrimaryTargets(
             enhanced
@@ -10783,10 +12922,24 @@
       };
     }
 
+    const settings = settingsPageRoot();
+    if (settings) {
+      zone = 'settings';
+      setExt('settings', settings, settingsControlTargets(settings));
+      return { type: 'settings', root: settings };
+    }
+
+    if (homeReturnPending && homeOrigin?.url === location.href && homeRowsRoot()) {
+      if (homeReturnTimer === null) restoreHomeOrigin();
+      return { type: 'home', root: homeRowsRoot() };
+    }
+
     if (
       zone ===
         'route-reset' ||
       [
+        'detail',
+        'settings',
         'native-dialog',
         'watchlist',
         'watchlist-dialog',
@@ -11084,36 +13237,93 @@
     );
 
     if (
+      context.type ===
+        'enhanced-modal'
+    ) {
+      /*
+       * Enhanced dynamically inserts Request, Download and status controls.
+       * Rebuild the control set for every remote move, then navigate visual
+       * rows deterministically so Request cannot become unreachable.
+       */
+      if (
+        event.key ===
+          'Enter' ||
+        event.key ===
+          ' '
+      ) {
+        const previous =
+          extTargets[
+            extIndex
+          ];
+
+        const targets =
+          enhancedPrimaryTargets(
+            context.root
+          );
+
+        setExt(
+          'enhanced-modal',
+          context.root,
+          targets,
+          previous ||
+            targets.find(
+              target =>
+                target.matches?.(
+                  '.jellyseerr-request-button:not([disabled]),' +
+                  '.jellyseerr-modal-button-primary:not([disabled])'
+                )
+            ) ||
+            targets[0]
+        );
+
+        activateUiControl(
+          extTargets[
+            extIndex
+          ]
+        );
+
+        setTimeout(
+          resolveContext,
+          100
+        );
+
+        return true;
+      }
+
+      moveEnhancedPopup(
+        event.key
+          .replace(
+            'Arrow',
+            ''
+          )
+          .toLowerCase(),
+        context.root
+      );
+
+      return true;
+    }
+
+    if (
       !extTargetsStillValid(
         context.root
       ) ||
       extContext !==
-      context.type
+        context.type
     ) {
-      const targets =
-        context.type ===
-        'enhanced-modal'
-          ?
-            enhancedPrimaryTargets(
-              context.root
-            )
-          :
-            seerrActionTargets(
-              context.root
-            );
-
       setExt(
         context.type,
         context.root,
-        targets
+        seerrActionTargets(
+          context.root
+        )
       );
     }
 
     if (
       event.key ===
-      'Enter' ||
+        'Enter' ||
       event.key ===
-      ' '
+        ' '
     ) {
       click(
         extTargets[
@@ -11211,21 +13421,7 @@
       event
     );
 
-    if (
-      !extTargetsStillValid(
-        root
-      ) ||
-      extContext !==
-      'detail'
-    ) {
-      setExt(
-        'detail',
-        root,
-        buildDetailTargets(
-          root
-        )
-      );
-    }
+    setExt('detail', root, buildDetailTargets(root));
 
     if (
       event.key ===
@@ -11239,6 +13435,8 @@
             extIndex
           ]
         );
+
+      if (activationTarget?.matches?.('select,input,textarea')) return activateUiControl(activationTarget);
 
       if (
         activationTarget?.matches?.(
@@ -11271,54 +13469,6 @@
       );
 
       return true;
-    }
-
-    const current =
-      extTargets[
-        extIndex
-      ];
-
-    if (
-      event.key ===
-      'ArrowDown' &&
-      current?.closest?.(
-        '.mainDetailButtons'
-      ) &&
-      detailSimilarCards(
-        root
-      ).length
-    ) {
-      if (
-        selectFreshDetailTarget(
-          root,
-          target =>
-            !!target.closest?.(
-              '#similarCollapsible'
-            )
-        )
-      ) {
-        return true;
-      }
-    }
-
-    if (
-      event.key ===
-      'ArrowUp' &&
-      current?.closest?.(
-        '#similarCollapsible'
-      )
-    ) {
-      if (
-        selectFreshDetailTarget(
-          root,
-          target =>
-            !!target.closest?.(
-              '.mainDetailButtons'
-            )
-        )
-      ) {
-        return true;
-      }
     }
 
     moveExt(
@@ -11672,7 +13822,7 @@
     );
 
     rows =
-      buildRowsWithin(
+      buildSeerrRows(
         root
       );
 
@@ -11733,20 +13883,10 @@
           true
         );
       } else {
-        selectRow(
-          rowIndex -
-          1,
-
-          Math.min(
-            cardIndex,
-
-            rows[
-              rowIndex -
+        selectVerticalRow(
+            rowIndex -
               1
-            ].cards.length -
-            1
-          )
-        );
+          );
       }
     } else if (
       event.key ===
@@ -11757,20 +13897,10 @@
         rows.length -
         1
       ) {
-        selectRow(
-          rowIndex +
-          1,
-
-          Math.min(
-            cardIndex,
-
-            rows[
-              rowIndex +
+        selectVerticalRow(
+            rowIndex +
               1
-            ].cards.length -
-            1
-          )
-        );
+          );
       }
     } else if (
       event.key ===
@@ -12024,6 +14154,7 @@
     event
   ) {
     homeMediaSettleToken++;
+    ensureHomeRowsObserver();
 
     if (
       isBackKey(
@@ -12191,11 +14322,7 @@
       return true;
     }
 
-    if (
-      !rows.length
-    ) {
-      rebuildRows();
-    }
+    refreshHomeRowsIfNeeded();
 
     const row =
       rows[
@@ -12239,26 +14366,7 @@
       event.key ===
       'ArrowDown'
     ) {
-      if (
-        rowIndex <
-        rows.length -
-        1
-      ) {
-        selectRow(
-          rowIndex +
-          1,
-
-          Math.min(
-            cardIndex,
-
-            rows[
-              rowIndex +
-              1
-            ].cards.length -
-            1
-          )
-        );
-      }
+      moveHomeDown();
     } else if (
       event.key ===
       'ArrowUp'
@@ -12271,20 +14379,10 @@
           false
         );
       } else {
-        selectRow(
-          rowIndex -
-          1,
-
-          Math.min(
-            cardIndex,
-
-            rows[
-              rowIndex -
+        selectVerticalRow(
+            rowIndex -
               1
-            ].cards.length -
-            1
-          )
-        );
+          );
       }
     } else if (
       event.key ===
@@ -12311,6 +14409,14 @@
       return;
     }
 
+    if (event.key !== 'ArrowDown') cancelPendingHomeDown();
+    if (homeReturnPending && homeOrigin?.url === location.href && event.key.startsWith('Arrow')) {
+      homeReturnPending = false;
+      homeReturnToken++;
+      clearTimeout(homeReturnTimer);
+      homeReturnTimer = null;
+    }
+
     if (
       keyboardRoot
     ) {
@@ -12332,6 +14438,11 @@
 
     const context =
       resolveContext();
+
+    if (context.type === 'settings') {
+      handleSettings(event, context.root);
+      return;
+    }
 
     if (
       context.type ===
@@ -12503,6 +14614,18 @@
   function handleKeyDown(
     event
   ) {
+    if (event.__jellynavNative) return;
+    if (nativeEditingControl) {
+      if (!nativeEditingControl.isConnected) nativeEditingControl = null;
+      else if (isBackKey(event.key) || event.key === 'Enter') {
+        consume(event);
+        const control = nativeEditingControl;
+        nativeEditingControl = null;
+        control.blur();
+        showFocusElement(control);
+        return;
+      } else return;
+    }
     if (
       event.altKey ||
       event.ctrlKey ||
@@ -12569,6 +14692,13 @@
   // ============================================================
 
   function cleanup() {
+    hideFocus();
+    homeReturnToken++;
+    clearTimeout(homeReturnTimer);
+    cancelPendingHomeDown();
+    homeRowsObserver?.disconnect();
+    homeRowsObserver = null;
+    homeRowsObserverRoot = null;
     universalHomeToken++;
     homeMediaSettleToken++;
     homeRowSettleToken++;
@@ -12650,6 +14780,19 @@
     backLongTriggered =
       false;
 
+    backPressStartedAt =
+      0;
+
+    backRepeatSeen =
+      false;
+
+    clearTimeout(
+      keyboardSearchTimer
+    );
+
+    keyboardSearchTimer =
+      null;
+
     keyboardRoot
       ?.remove();
 
@@ -12669,6 +14812,12 @@
 
     keyboardInput =
       null;
+
+    keyboardValue =
+      '';
+
+    keyboardLiveSearch =
+      false;
 
     focusRing =
       null;
@@ -12769,6 +14918,12 @@
 
             rowIndex,
             cardIndex,
+            homeRows: rows.length,
+            homeLazyLoading: {
+              rowsDirty: homeRowsDirty,
+              waitingForNextRow: !!pendingHomeDown,
+              observerActive: !!homeRowsObserver
+            },
 
             mediaControlIndex,
             headerIndex,

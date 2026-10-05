@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '2026.10.03-r12.24.1';
+  const VERSION = 'v1';
   const LONG_PRESS_REFRESH_MS = 900;
   const LONG_PRESS_HOME_MS = 900;
 
@@ -31,6 +31,7 @@
 
   let headerTargets = [];
   let headerIndex = 0;
+  let headerFocusIdentity = null;
 
   let focusRing = null;
   let injectedStyle = null;
@@ -43,6 +44,8 @@
 
   let playerObserver = null;
   let playerObserverRoot = null;
+  let playerUpNextObserver = null;
+  let playerUpNextObserverRoot = null;
 
   let rebuildTimer = null;
   let contextRefreshTimer = null;
@@ -70,6 +73,13 @@
   let playerLane = 'bottom';
   let playerBottomIndex = 0;
   let playerTopIndex = 0;
+  let playerActionIndex = 0;
+  let playerScrubDirection = null;
+  let playerScrubStartedAt = 0;
+  let playerScrubRepeats = 0;
+  let playerScrubPreviewPercent = null;
+  let playerScrubPreviewTimer = null;
+  let playerScrubSlider = null;
 
   let keyboardRoot = null;
   let keyboardInput = null;
@@ -1109,8 +1119,72 @@
   }
 
   function focusMetrics(el) {
-    const rect =
+    const sourceRect =
       el.getBoundingClientRect();
+
+    /*
+     * SeerrFin's Movies / Shows toggle buttons sit in a control row whose
+     * layout box extends upward into the Discover heading. The visible control
+     * is the text line at the bottom of that box, so anchor JellyNav's ring to
+     * the bottom instead of centering it in the oversized layout rectangle.
+     */
+    const isDiscoverMode =
+      el.matches?.(
+        '[data-discover-type]'
+      );
+
+    let rect =
+      sourceRect;
+
+    if (isDiscoverMode) {
+      /*
+       * Use the rendered text itself as the visual target. SeerrFin's button
+       * box is intentionally much larger than the word, which made any
+       * button-rect based ring overlap the Discover heading.
+       */
+      try {
+        const range =
+          document.createRange();
+
+        range.selectNodeContents(
+          el
+        );
+
+        const textRect =
+          range.getBoundingClientRect();
+
+        if (
+          textRect.width >
+            0 &&
+          textRect.height >
+            0
+        ) {
+          const paddingX =
+            2;
+
+          const paddingY =
+            1;
+
+          rect = {
+            left:
+              textRect.left -
+              paddingX,
+
+            top:
+              textRect.top -
+              paddingY,
+
+            width:
+              textRect.width +
+              paddingX * 2,
+
+            height:
+              textRect.height +
+              paddingY * 2
+          };
+        }
+      } catch (_) {}
+    }
 
     const isCard =
       !!el.closest(
@@ -1129,6 +1203,9 @@
       );
 
     const expand =
+      isDiscoverMode
+        ? 0
+        :
       isCard
         ? 4
         :
@@ -1356,6 +1433,24 @@
     if (!el) {
       hideFocus();
       return;
+    }
+
+    /*
+     * SeerrFin's Discover toggles can retain the browser/theme focus outline
+     * after JellyNav has moved its own ring elsewhere. Clear that native focus
+     * only when leaving one of those controls.
+     */
+    if (
+      focusTarget &&
+      focusTarget !==
+        el &&
+      focusTarget.matches?.(
+        '[data-discover-type]'
+      )
+    ) {
+      try {
+        focusTarget.blur();
+      } catch (_) {}
     }
 
     createFocusRing();
@@ -1703,7 +1798,131 @@
     }
   }
 
-  function scrollDetailTarget(el) {
+  function detailHorizontalRow(
+    target
+  ) {
+    const container =
+      target?.closest?.(
+        '.itemsContainer.scrollSlider'
+      );
+
+    if (!container) {
+      return null;
+    }
+
+    const scroller =
+      container.closest(
+        '.emby-scroller'
+      );
+
+    if (!scroller) {
+      return null;
+    }
+
+    const cards =
+      [
+        ...container.children
+      ].filter(
+        card =>
+          card.classList?.contains(
+            'card'
+          ) &&
+          visible(
+            card
+          )
+      );
+
+    if (
+      !cards.includes(
+        target
+      )
+    ) {
+      return null;
+    }
+
+    return {
+      container,
+      scroller,
+      section:
+        container.closest(
+          '.verticalSection'
+        ),
+      cards
+    };
+  }
+
+  function detailHorizontalNeighbor(
+    direction
+  ) {
+    const current =
+      extTargets[
+        extIndex
+      ];
+
+    const row =
+      detailHorizontalRow(
+        current
+      );
+
+    if (
+      !row ||
+      ![
+        'left',
+        'right'
+      ].includes(
+        direction
+      )
+    ) {
+      return null;
+    }
+
+    const index =
+      row.cards.indexOf(
+        current
+      );
+
+    if (
+      index <
+      0
+    ) {
+      return null;
+    }
+
+    const nextIndex =
+      index +
+      (
+        direction ===
+          'right'
+          ? 1
+          : -1
+      );
+
+    if (
+      nextIndex <
+        0 ||
+      nextIndex >=
+        row.cards.length
+    ) {
+      return {
+        row,
+        target:
+          null
+      };
+    }
+
+    return {
+      row,
+      target:
+        row.cards[
+          nextIndex
+        ]
+    };
+  }
+
+  function scrollDetailTarget(
+    el,
+    direction = null
+  ) {
     if (!el) {
       return;
     }
@@ -1749,6 +1968,39 @@
         behavior:
           'auto'
       });
+
+      return;
+    }
+
+    const detailRow =
+      detailHorizontalRow(
+        el
+      );
+
+    if (detailRow) {
+      /*
+       * Details media rows are real Jellyfin carousels. Vertically reveal the
+       * row viewport itself, never the card: card.scrollIntoView() can move a
+       * horizontal carousel behind our back. JellyNav alone owns X movement.
+       */
+      try {
+        detailRow.scroller.scrollIntoView({
+          behavior:
+            'auto',
+
+          block:
+            'nearest',
+
+          inline:
+            'nearest'
+        });
+      } catch (_) {}
+
+      revealCardHorizontally(
+        detailRow,
+        el,
+        direction
+      );
 
       return;
     }
@@ -1928,6 +2180,327 @@
     );
   }
 
+  function activePanelTabTarget() {
+    const activePanels =
+      [
+        ...document.querySelectorAll(
+          '.tabContent.pageTabContent.is-active'
+        )
+      ]
+        .filter(
+          panel =>
+            panel.isConnected &&
+            visible(
+              panel
+            )
+        )
+        .reverse();
+
+    for (
+      const panel of
+      activePanels
+    ) {
+      const index =
+        panel.getAttribute(
+          'data-index'
+        );
+
+      if (
+        index == null
+      ) {
+        continue;
+      }
+
+      const target =
+        headerTargets.find(
+          candidate =>
+            candidate.matches?.(
+              '.emby-tab-button'
+            ) &&
+            candidate.getAttribute(
+              'data-index'
+            ) ===
+              index
+        );
+
+      if (target) {
+        return target;
+      }
+    }
+
+    return null;
+  }
+
+  function selectedIndexTabTarget() {
+    const tabSets =
+      [
+        ...document.querySelectorAll(
+          '[is="emby-tabs"]'
+        )
+      ];
+
+    for (
+      const tabs of
+      tabSets
+    ) {
+      let index =
+        null;
+
+      try {
+        if (
+          typeof tabs.selectedIndex ===
+          'function'
+        ) {
+          index =
+            tabs.selectedIndex();
+        } else if (
+          Number.isFinite(
+            tabs.selectedTabIndex
+          )
+        ) {
+          index =
+            tabs.selectedTabIndex;
+        }
+      } catch (_) {}
+
+      if (
+        !Number.isFinite(
+          Number(
+            index
+          )
+        )
+      ) {
+        continue;
+      }
+
+      const target =
+        headerTargets.find(
+          candidate =>
+            candidate.matches?.(
+              '.emby-tab-button'
+            ) &&
+            Number(
+              candidate.getAttribute(
+                'data-index'
+              )
+            ) ===
+              Number(
+                index
+              )
+        );
+
+      if (target) {
+        return target;
+      }
+    }
+
+    return null;
+  }
+
+  function preferredActiveHeaderTarget() {
+    return (
+      activePanelTabTarget() ||
+      headerTargets.find(
+        target =>
+          target.getAttribute?.(
+            'aria-selected'
+          ) ===
+            'true'
+      ) ||
+      selectedIndexTabTarget() ||
+      headerTargets.find(
+        target =>
+          target.classList?.contains(
+            'emby-tab-button-active'
+          )
+      ) ||
+      null
+    );
+  }
+
+  function activateNativeInjectedTab(
+    target
+  ) {
+    if (
+      !target?.id?.startsWith(
+        'je-native-tab-btn-'
+      )
+    ) {
+      return false;
+    }
+
+    const id =
+      target.id.replace(
+        'je-native-tab-btn-',
+        ''
+      );
+
+    const panelId =
+      'je-native-tab-panel-' +
+      id;
+
+    /*
+     * Jellyfin Enhanced and SeerrFin both participate in this shared tab bar.
+     * A real click is the one path both plugins already cooperate on:
+     *
+     * - SeerrFin records #/home?tab=N for external tabs.
+     * - Jellyfin's emby-tabs handler selects the clicked button.
+     * - SeerrFin's beforetabchange handler activates the panel with that index.
+     * - Jellyfin Enhanced sees its Requests panel become active and mounts it.
+     *
+     * Driving JE through ?jeTab= while a real Enter is in flight can trigger
+     * JE's recent-user-input guard and leave Discover active until a second
+     * press. Do not use that deep-link path for D-pad activation.
+     */
+    const panel =
+      document.getElementById(
+        panelId
+      );
+
+    /*
+     * If a previous race left Requests visually active while its panel is not,
+     * Jellyfin would treat another click on the same active button as a no-op.
+     * Clear only that stale button state before issuing the real click.
+     */
+    if (
+      !panel?.classList.contains(
+        'is-active'
+      ) &&
+      target.classList.contains(
+        'emby-tab-button-active'
+      )
+    ) {
+      target.classList.remove(
+        'emby-tab-button-active'
+      );
+
+      if (
+        target.getAttribute(
+          'aria-selected'
+        ) ===
+          'true'
+      ) {
+        target.setAttribute(
+          'aria-selected',
+          'false'
+        );
+      }
+    }
+
+    click(
+      target
+    );
+
+    const settle =
+      attempt => {
+        const liveTarget =
+          document.getElementById(
+            'je-native-tab-btn-' +
+            id
+          );
+
+        const livePanel =
+          document.getElementById(
+            panelId
+          );
+
+        if (
+          liveTarget &&
+          livePanel?.classList.contains(
+            'is-active'
+          )
+        ) {
+          normalizeInjectedNativeTabVisualState(
+            liveTarget
+          );
+
+          rebuildHeaderTargets();
+
+          const index =
+            headerTargets.indexOf(
+              liveTarget
+            );
+
+          if (
+            index >=
+            0
+          ) {
+            headerIndex =
+              index;
+          }
+
+          rememberHeaderFocus(
+            liveTarget
+          );
+
+          rememberParentMainTab(
+            liveTarget
+          );
+
+          zone =
+            'header';
+
+          showFocusElement(
+            liveTarget
+          );
+
+          return;
+        }
+
+        /*
+         * The shared tab bar can be rebuilt immediately after the click.
+         * Retry the click once against the live replacement button, then only
+         * observe. This is intentionally not selectedIndex(): the click path
+         * is what keeps SeerrFin, Jellyfin and JE in agreement.
+         */
+        if (
+          attempt ===
+            2 &&
+          liveTarget
+        ) {
+          if (
+            liveTarget.classList.contains(
+              'emby-tab-button-active'
+            ) &&
+            !livePanel?.classList.contains(
+              'is-active'
+            )
+          ) {
+            liveTarget.classList.remove(
+              'emby-tab-button-active'
+            );
+          }
+
+          click(
+            liveTarget
+          );
+        }
+
+        if (
+          attempt <
+          10
+        ) {
+          setTimeout(
+            () =>
+              settle(
+                attempt + 1
+              ),
+            100
+          );
+        }
+      };
+
+    setTimeout(
+      () =>
+        settle(
+          0
+        ),
+      80
+    );
+
+    return true;
+  }
+
   function mainTabKey(
     target
   ) {
@@ -1940,6 +2513,13 @@
         'jws3-home-tab'
     ) {
       return 'watchlist';
+    }
+
+    if (
+      target.id ===
+        'je-native-tab-btn-requests'
+    ) {
+      return 'requests';
     }
 
     const label =
@@ -1970,8 +2550,129 @@
       : null;
   }
 
+  function normalizeInjectedNativeTabVisualState(
+    target
+  ) {
+    if (
+      !target?.id?.startsWith(
+        'je-native-tab-btn-'
+      )
+    ) {
+      return false;
+    }
+
+    const index =
+      target.getAttribute(
+        'data-index'
+      );
+
+    if (
+      index == null
+    ) {
+      return false;
+    }
+
+    const activePanel =
+      [
+        ...document.querySelectorAll(
+          '.tabContent.pageTabContent.is-active'
+        )
+      ].find(
+        panel =>
+          panel.getAttribute(
+            'data-index'
+          ) ===
+            index &&
+          visible(
+            panel
+          )
+      );
+
+    const selected =
+      selectedIndexTabTarget();
+
+    if (
+      !activePanel &&
+      selected !==
+        target
+    ) {
+      return false;
+    }
+
+    const tabSet =
+      target.closest(
+        '[is="emby-tabs"]'
+      ) ||
+      document.querySelector(
+        '[is="emby-tabs"]'
+      );
+
+    const buttons =
+      tabSet
+        ? [
+            ...tabSet.querySelectorAll(
+              '.emby-tab-button'
+            )
+          ]
+        : headerTargets.filter(
+            button =>
+              button.matches?.(
+                '.emby-tab-button'
+              )
+          );
+
+    for (
+      const button of
+      buttons
+    ) {
+      if (
+        button ===
+        target
+      ) {
+        button.classList.add(
+          'emby-tab-button-active'
+        );
+
+        button.setAttribute(
+          'aria-selected',
+          'true'
+        );
+      } else {
+        button.classList.remove(
+          'emby-tab-button-active'
+        );
+
+        if (
+          button.getAttribute(
+            'aria-selected'
+          ) ===
+            'true'
+        ) {
+          button.setAttribute(
+            'aria-selected',
+            'false'
+          );
+        }
+      }
+    }
+
+    return true;
+  }
+
   function activeMainTabKey() {
     rebuildHeaderTargets();
+
+    const preferred =
+      preferredActiveHeaderTarget();
+
+    const preferredKey =
+      mainTabKey(
+        preferred
+      );
+
+    if (preferredKey) {
+      return preferredKey;
+    }
 
     const active =
       headerTargets.find(
@@ -1979,14 +2680,8 @@
           mainTabKey(
             target
           ) &&
-          (
-            target.classList.contains(
-              'emby-tab-button-active'
-            ) ||
-            target.getAttribute(
-              'aria-selected'
-            ) ===
-              'true'
+          target.classList.contains(
+            'emby-tab-button-active'
           )
       );
 
@@ -2184,24 +2879,85 @@
       rebuildHeaderTargets();
     }
 
-    const activeIndex =
-      headerTargets.findIndex(
-        el =>
-          el.classList
-            .contains(
-              'emby-tab-button-active'
-            ) ||
-          el.getAttribute(
-            'aria-selected'
-          ) ===
-            'true'
+    const preferred =
+      preferredActiveHeaderTarget();
+
+    if (preferred) {
+      const index =
+        headerTargets.indexOf(
+          preferred
+        );
+
+      if (
+        index >=
+        0
+      ) {
+        return index;
+      }
+    }
+
+    return 0;
+  }
+
+  function headerIdentity(
+    target
+  ) {
+    if (!target) {
+      return null;
+    }
+
+    const seerrId =
+      target.getAttribute?.(
+        'data-seerrfin-tab'
       );
 
+    if (seerrId) {
+      return 'seerr:' +
+        seerrId;
+    }
+
+    if (target.id) {
+      return 'id:' +
+        target.id;
+    }
+
+    const key =
+      mainTabKey(
+        target
+      );
+
+    return key
+      ? 'main:' + key
+      : null;
+  }
+
+  function rememberHeaderFocus(
+    target
+  ) {
+    headerFocusIdentity =
+      headerIdentity(
+        target
+      );
+
+    return target;
+  }
+
+  function findRememberedHeaderTarget() {
+    if (
+      !headerFocusIdentity
+    ) {
+      return null;
+    }
+
     return (
-      activeIndex >=
-      0
-        ? activeIndex
-        : 0
+      headerTargets.find(
+        target =>
+          headerIdentity(
+            target
+          ) ===
+            headerFocusIdentity
+      ) ||
+      null
     );
   }
 
@@ -2228,10 +2984,17 @@
     zone =
       'header';
 
-    showFocusElement(
+    const target =
       headerTargets[
         headerIndex
-      ]
+      ];
+
+    rememberHeaderFocus(
+      target
+    );
+
+    showFocusElement(
+      target
     );
 
     return true;
@@ -2265,10 +3028,17 @@
             1
           );
 
-    showFocusElement(
+    const target =
       headerTargets[
         headerIndex
-      ]
+      ];
+
+    rememberHeaderFocus(
+      target
+    );
+
+    showFocusElement(
+      target
     );
   }
 
@@ -2380,20 +3150,80 @@
             clearNativeLibraryState();
 
             rebuildHeaderTargets();
+
+            const seerrId =
+              target.getAttribute?.(
+                'data-seerrfin-tab'
+              );
+
+            const requestedId =
+              target.id?.startsWith(
+                'je-native-tab-btn-'
+              )
+                ? target.id
+                : null;
+
+            const pinned =
+              (
+                seerrId
+                  ? headerTargets.find(
+                      candidate =>
+                        candidate.getAttribute?.(
+                          'data-seerrfin-tab'
+                        ) ===
+                          seerrId
+                    )
+                  : null
+              ) ||
+              (
+                requestedId
+                  ? headerTargets.find(
+                      candidate =>
+                        candidate.id ===
+                          requestedId
+                    )
+                  : null
+              );
+
             headerIndex =
-              findActiveHeaderIndex();
-            zone = 'header';
+              pinned
+                ? headerTargets.indexOf(
+                    pinned
+                  )
+                : findActiveHeaderIndex();
+
+            zone =
+              'header';
 
             const active =
+              pinned ||
               headerTargets[
                 headerIndex
               ];
+
+            /*
+             * Do not let a stale Discover/Home selectedIndex steal focus while
+             * SeerrFin or JE is still mounting the requested tab. Their route
+             * handlers own activation; JellyNav only keeps the user's selected
+             * header target stable during that async transition.
+             */
+            if (
+              !pinned
+            ) {
+              normalizeInjectedNativeTabVisualState(
+                active
+              );
+            }
 
             rememberParentMainTab(
               active
             );
 
             if (active) {
+              rememberHeaderFocus(
+                active
+              );
+
               showFocusElement(
                 active
               );
@@ -2424,6 +3254,178 @@
         },
         160
       );
+  }
+
+  function activateSeerrFinHeaderTab(
+    target
+  ) {
+    const id =
+      target?.getAttribute?.(
+        'data-seerrfin-tab'
+      );
+
+    if (!id) {
+      return false;
+    }
+
+    /*
+     * Route first. This is the known-good path that actually mounts Requests.
+     * Do not call selectedIndex() ourselves while SeerrFin is rebuilding the
+     * bar; doing that can select a stale slot and prevent Requests from opening.
+     */
+    const nextHash =
+      '#/home?seerrfinTab=' +
+      encodeURIComponent(
+        id
+      );
+
+    if (
+      location.hash !==
+      nextHash
+    ) {
+      location.hash =
+        nextHash;
+    }
+
+    /*
+     * Once SeerrFin has rebuilt the requested button/panel, finish selection
+     * with a normal button click. That lets SeerrFin's capture handler and
+     * Jellyfin's emby-tabs handler run in their intended order, so the route,
+     * active button and active panel converge on the same tab.
+     */
+    const settleSelection =
+      attempt => {
+        if (
+          !location.hash.includes(
+            'seerrfinTab=' +
+            encodeURIComponent(
+              id
+            )
+          )
+        ) {
+          return;
+        }
+
+        const liveTarget =
+          [
+            ...document.querySelectorAll(
+              '.emby-tab-button[data-seerrfin-tab="' +
+              CSS.escape(
+                id
+              ) +
+              '"]'
+            )
+          ].find(
+            visible
+          );
+
+        const panel =
+          [
+            ...document.querySelectorAll(
+              '.tabContent[data-seerrfin-tab="' +
+              CSS.escape(
+                id
+              ) +
+              '"]'
+            )
+          ].find(
+            candidate =>
+              candidate.isConnected
+          );
+
+        if (
+          liveTarget &&
+          panel
+        ) {
+          const fullySelected =
+            liveTarget.classList.contains(
+              'emby-tab-button-active'
+            ) &&
+            panel.classList.contains(
+              'is-active'
+            );
+
+          if (
+            !fullySelected &&
+            attempt ===
+              0
+          ) {
+            click(
+              liveTarget
+            );
+          }
+
+          if (
+            fullySelected ||
+            (
+              liveTarget.classList.contains(
+                'emby-tab-button-active'
+              ) &&
+              visible(
+                panel
+              )
+            )
+          ) {
+            rebuildHeaderTargets();
+
+            const selectedTarget =
+              headerTargets.find(
+                candidate =>
+                  candidate.getAttribute?.(
+                    'data-seerrfin-tab'
+                  ) ===
+                    id
+              );
+
+            if (selectedTarget) {
+              headerIndex =
+                headerTargets.indexOf(
+                  selectedTarget
+                );
+
+              rememberHeaderFocus(
+                selectedTarget
+              );
+
+              rememberParentMainTab(
+                selectedTarget
+              );
+
+              zone =
+                'header';
+
+              showFocusElement(
+                selectedTarget
+              );
+            }
+
+            return;
+          }
+        }
+
+        if (
+          attempt <
+          12
+        ) {
+          setTimeout(
+            () =>
+              settleSelection(
+                attempt + 1
+              ),
+            100
+          );
+        }
+      };
+
+    setTimeout(
+      () =>
+        settleSelection(
+          0
+        ),
+      80
+    );
+
+    return true;
   }
 
   function activateHeader() {
@@ -2477,9 +3479,22 @@
       }
     }
 
-    click(
+    rememberHeaderFocus(
       target
     );
+
+    if (
+      !activateSeerrFinHeaderTab(
+        target
+      ) &&
+      !activateNativeInjectedTab(
+        target
+      )
+    ) {
+      click(
+        target
+      );
+    }
 
     settleAfterHeaderActivation(
       target
@@ -3250,10 +4265,10 @@
     return (
       cardRect.left >=
       viewportRect.left +
-      40 &&
+      8 &&
       cardRect.right <=
       viewportRect.right -
-      40
+      8
     );
   }
 
@@ -3282,7 +4297,8 @@
 
   function revealCardHorizontally(
     row,
-    card
+    card,
+    direction = null
   ) {
     const scroller =
       horizontalScrollerForRow(
@@ -3305,39 +4321,6 @@
       return true;
     }
 
-    /*
-     * Jellyfin's Legacy scroller can run in transform mode, where scrollLeft
-     * does not represent the visible carousel position. Use the public
-     * emby-scroller API first; it handles both native and transform modes.
-     */
-    if (
-      typeof scroller.toCenter ===
-      'function'
-    ) {
-      scroller.toCenter(
-        card,
-        true
-      );
-
-      return true;
-    }
-
-    if (
-      typeof scroller.scroller
-        ?.toCenter ===
-      'function'
-    ) {
-      scroller.scroller.toCenter(
-        card,
-        true
-      );
-
-      return true;
-    }
-
-    /*
-     * Browser-test / non-custom-element fallback. Touch only horizontal state.
-     */
     const viewportRect =
       scroller
         .getBoundingClientRect();
@@ -3346,30 +4329,88 @@
       card
         .getBoundingClientRect();
 
+    /*
+     * One D-pad press owns one card. When that next/previous card crosses an
+     * edge, align only that edge instead of centering the card. Jellyfin's
+     * toStart/toEnd APIs work for both native-scroll and transform carousels.
+     */
+    const edge =
+      direction ===
+        'left' ||
+      (
+        direction !==
+          'right' &&
+        cardRect.left <
+          viewportRect.left
+      )
+        ? 'start'
+        : 'end';
+
+    const method =
+      edge ===
+        'start'
+        ? 'toStart'
+        : 'toEnd';
+
+    if (
+      typeof scroller[
+        method
+      ] ===
+      'function'
+    ) {
+      scroller[
+        method
+      ](
+        card,
+        true
+      );
+
+      return true;
+    }
+
+    if (
+      typeof scroller.scroller?.[
+        method
+      ] ===
+      'function'
+    ) {
+      scroller.scroller[
+        method
+      ](
+        card,
+        true
+      );
+
+      return true;
+    }
+
+    /*
+     * Browser/non-custom-element fallback: reveal only the clipped edge.
+     */
     let delta =
       0;
 
     if (
       cardRect.left <
       viewportRect.left +
-        40
+        8
     ) {
       delta =
         cardRect.left -
         (
           viewportRect.left +
-          40
+          8
         );
     } else if (
       cardRect.right >
       viewportRect.right -
-        40
+        8
     ) {
       delta =
         cardRect.right -
         (
           viewportRect.right -
-          40
+          8
         );
     }
 
@@ -3458,7 +4499,8 @@
 
     revealCardHorizontally(
       row,
-      card
+      card,
+      direction
     );
 
     showFocus(
@@ -3487,7 +4529,8 @@
         ) {
           revealCardHorizontally(
             row,
-            card
+            card,
+            direction
           );
 
           showFocus(
@@ -3992,6 +5035,54 @@
 
     if (/^#!?\/home(?:[?/?]|$)/i.test(location.hash) && zone === 'library') {
       captureHomeOrigin(card);
+    }
+
+    /*
+     * SeerrFin's Movies / Shows controls are logical cards for TV navigation,
+     * but our generic click() helper intentionally focuses its target first.
+     * That browser focus triggers the theme/plugin's larger :focus-visible box
+     * behind JellyNav's compact text ring. Activate these two controls without
+     * transferring DOM focus, then explicitly clear any focus SeerrFin/Jellyfin
+     * may assign during its click handler.
+     */
+    if (
+      card.matches?.(
+        '[data-discover-type]'
+      )
+    ) {
+      try {
+        card.click();
+      } catch (_) {
+        return;
+      }
+
+      requestAnimationFrame(
+        () => {
+          try {
+            if (
+              document.activeElement ===
+              card
+            ) {
+              card.blur();
+            }
+          } catch (_) {}
+
+          if (
+            card.isConnected &&
+            visible(
+              card
+            ) &&
+            focusTarget ===
+              card
+          ) {
+            showFocusElement(
+              card
+            );
+          }
+        }
+      );
+
+      return;
     }
 
     click(
@@ -4619,12 +5710,37 @@
   function moveExt(
     direction
   ) {
+    let detailHorizontal =
+      null;
+
+    if (
+      extContext ===
+        'detail' &&
+      [
+        'left',
+        'right'
+      ].includes(
+        direction
+      )
+    ) {
+      detailHorizontal =
+        detailHorizontalNeighbor(
+          direction
+        );
+    }
+
     let next =
-      spatialNext(
-        direction,
-        extTargets,
-        extIndex
-      );
+      detailHorizontal?.target
+        ?
+          extTargets.indexOf(
+            detailHorizontal.target
+          )
+        :
+          spatialNext(
+            direction,
+            extTargets,
+            extIndex
+          );
 
     // On Details, visit the next vertical band even when Request More is
     // right-aligned far from Play. Horizontal distance must not skip a section.
@@ -4649,6 +5765,13 @@
     }
 
     if (
+      detailHorizontal &&
+      !detailHorizontal.target
+    ) {
+      return false;
+    }
+
+    if (
       next <
       0
     ) {
@@ -4668,7 +5791,8 @@
       'detail'
     ) {
       scrollDetailTarget(
-        target
+        target,
+        direction
       );
     } else if (
       extContext ===
@@ -8895,6 +10019,86 @@
     );
   }
 
+  function playerSegmentSkipButton() {
+    /*
+     * Jellyfin 12 renders media-segment prompts as a global body-level
+     * .skip-button. Intro Skipper mirrors Intro, Recap, Preview and Outro
+     * segments into Jellyfin MediaSegments, so one selector covers every
+     * current Intro Skipper prompt without relying on translated button text.
+     */
+    return [
+      ...document.querySelectorAll(
+        '.skip-button:not([disabled])'
+      )
+    ].find(
+      button =>
+        visible(
+          button
+        ) &&
+        !button.classList.contains(
+          'skip-button-hidden'
+        ) &&
+        !button.classList.contains(
+          'hide'
+        )
+    ) || null;
+  }
+
+  function playerUpNextControls() {
+    /*
+     * Jellyfin intentionally suppresses a final Outro skip prompt when its
+     * Up Next dialog is expected. That dialog provides Start Now
+     * (.btnStartNow) and Hide (.btnHide).
+     */
+    const root =
+      [
+        ...document.querySelectorAll(
+          '.upNextDialog'
+        )
+      ].find(
+        candidate =>
+          visible(
+            candidate
+          ) &&
+          !candidate.classList.contains(
+            'upNextDialog-hidden'
+          ) &&
+          !candidate.classList.contains(
+            'hide'
+          )
+      );
+
+    if (!root) {
+      return [];
+    }
+
+    return uniqueVisible([
+      ...root.querySelectorAll(
+        '.btnStartNow:not([disabled]),' +
+        '.btnHide:not([disabled])'
+      )
+    ]);
+  }
+
+  function playerActionControls(
+    page
+  ) {
+    if (!page) {
+      return [];
+    }
+
+    const skip =
+      playerSegmentSkipButton();
+
+    if (skip) {
+      return [
+        skip
+      ];
+    }
+
+    return playerUpNextControls();
+  }
+
   function playerSlider(
     page
   ) {
@@ -9015,13 +10219,68 @@
     const page =
       playerPage();
 
+    const sleepingActions =
+      page &&
+      playerLane ===
+        'action'
+        ? playerActionControls(
+            page
+          )
+        : [];
+
+    /*
+     * Up Next and segment-skip prompts can remain visible while Jellyfin's
+     * normal OSD is sleeping. Keep JellyNav focus alive for those transient
+     * actions instead of hiding it with the OSD.
+     */
     if (
       !page ||
-      playerSleeping(
-        page
+      (
+        playerSleeping(
+          page
+        ) &&
+        !sleepingActions.length
       )
     ) {
       hideFocus();
+
+      return;
+    }
+
+    if (
+      playerLane ===
+      'action'
+    ) {
+      const actions =
+        sleepingActions.length
+          ? sleepingActions
+          : playerActionControls(
+              page
+            );
+
+      if (!actions.length) {
+        playerLane =
+          'bottom';
+
+        showPlayerFocus();
+        return;
+      }
+
+      playerActionIndex =
+        Math.max(
+          0,
+          Math.min(
+            playerActionIndex,
+            actions.length -
+              1
+          )
+        );
+
+      showFocusElement(
+        actions[
+          playerActionIndex
+        ]
+      );
 
       return;
     }
@@ -9155,76 +10414,380 @@
     return true;
   }
 
-  function seekPlayer(
+  function formatPlayerScrubTime(
+    seconds
+  ) {
+    seconds =
+      Math.max(
+        0,
+        Math.round(
+          Number(seconds) ||
+            0
+        )
+      );
+
+    const hours =
+      Math.floor(
+        seconds /
+          3600
+      );
+
+    const minutes =
+      Math.floor(
+        (
+          seconds %
+          3600
+        ) /
+          60
+      );
+
+    const secs =
+      seconds %
+      60;
+
+    return hours >
+      0
+      ? [
+          hours,
+          String(
+            minutes
+          ).padStart(
+            2,
+            '0'
+          ),
+          String(
+            secs
+          ).padStart(
+            2,
+            '0'
+          )
+        ].join(
+          ':'
+        )
+      : [
+          minutes,
+          String(
+            secs
+          ).padStart(
+            2,
+            '0'
+          )
+        ].join(
+          ':'
+        );
+  }
+
+  function paintPlayerScrubPreview() {
+    if (
+      playerScrubPreviewPercent ==
+        null
+    ) {
+      return;
+    }
+
+    const page =
+      playerPage();
+
+    const slider =
+      playerScrubSlider &&
+      playerScrubSlider.isConnected
+        ? playerScrubSlider
+        : playerSlider(
+            page
+          );
+
+    const video =
+      page
+        ? activePlayerVideo(
+            page
+          )
+        : null;
+
+    if (
+      !slider ||
+      !video ||
+      !Number.isFinite(
+        video.duration
+      ) ||
+      video.duration <=
+        0
+    ) {
+      return;
+    }
+
+    playerScrubSlider =
+      slider;
+
+    slider.value =
+      String(
+        playerScrubPreviewPercent
+      );
+
+    try {
+      slider.dispatchEvent(
+        new Event(
+          'input',
+          {
+            bubbles:
+              true
+          }
+        )
+      );
+    } catch (_) {}
+
+    const previewSeconds =
+      video.duration *
+      playerScrubPreviewPercent /
+      100;
+
+    const positionText =
+      page.querySelector(
+        '.osdPositionText'
+      );
+
+    if (positionText) {
+      positionText.textContent =
+        formatPlayerScrubTime(
+          previewSeconds
+        );
+    }
+  }
+
+  function beginPlayerScrubPreview(
     direction
   ) {
     const page =
       playerPage();
 
-    if (!page) {
+    const slider =
+      playerSlider(
+        page
+      );
+
+    const video =
+      page
+        ? activePlayerVideo(
+            page
+          )
+        : null;
+
+    if (
+      !slider ||
+      !video ||
+      !Number.isFinite(
+        video.duration
+      ) ||
+      video.duration <=
+        0
+    ) {
       return false;
     }
 
-    keepPlayerOsdAlive();
+    playerScrubDirection =
+      direction;
 
-    const button =
-      direction ===
-      'left'
-        ?
-          page.querySelector(
-            '.btnRewind'
-          )
-        :
-          page.querySelector(
-            '.btnFastForward'
-          );
+    playerScrubStartedAt =
+      Date.now();
 
-    if (
-      button &&
-      visible(
-        button
-      )
-    ) {
-      return click(
-        button
+    playerScrubRepeats =
+      0;
+
+    playerScrubSlider =
+      slider;
+
+    const livePercent =
+      (
+        Number.isFinite(
+          video.currentTime
+        )
+          ? video.currentTime /
+            video.duration *
+            100
+          : Number(
+              slider.value
+            )
       );
-    }
 
-    const video = [
-      ...document.querySelectorAll(
-        'video.htmlvideoplayer,' +
-        'video'
-      )
-    ].find(
-      visible
+    playerScrubPreviewPercent =
+      Math.max(
+        0,
+        Math.min(
+          100,
+          Number.isFinite(
+            livePercent
+          )
+            ? livePercent
+            : 0
+        )
+      );
+
+    clearInterval(
+      playerScrubPreviewTimer
     );
+
+    /*
+     * Jellyfin's timeupdate loop repaints the OSD from the real playback
+     * position while a seek is only being previewed. Re-assert the preview
+     * briefly so the thumb and timestamp remain visibly attached to the remote.
+     */
+    playerScrubPreviewTimer =
+      setInterval(
+        paintPlayerScrubPreview,
+        80
+      );
+
+    return true;
+  }
+
+  function scrubPlayer(
+    direction
+  ) {
+    const page =
+      playerPage();
+
+    const video =
+      page
+        ? activePlayerVideo(
+            page
+          )
+        : null;
 
     if (
       !video ||
       !Number.isFinite(
         video.duration
-      )
+      ) ||
+      video.duration <=
+        0
     ) {
       return false;
     }
 
-    video.currentTime =
+    if (
+      playerScrubDirection !==
+        direction ||
+      playerScrubPreviewPercent ==
+        null
+    ) {
+      if (
+        !beginPlayerScrubPreview(
+          direction
+        )
+      ) {
+        return false;
+      }
+    }
+
+    const heldFor =
+      Date.now() -
+      playerScrubStartedAt;
+
+    const seconds =
+      heldFor >=
+        4000
+        ? 60
+        :
+      heldFor >=
+        2500
+        ? 30
+        :
+      heldFor >=
+        1200
+        ? 20
+        : 10;
+
+    playerScrubRepeats++;
+
+    const deltaPercent =
+      seconds /
+      video.duration *
+      100 *
+      (
+        direction ===
+          'left'
+          ? -1
+          : 1
+      );
+
+    playerScrubPreviewPercent =
       Math.max(
         0,
         Math.min(
-          video.duration,
-
-          video.currentTime +
-          (
-            direction ===
-            'left'
-              ? -10
-              : 10
-          )
+          100,
+          playerScrubPreviewPercent +
+            deltaPercent
         )
       );
 
+    keepPlayerOsdAlive();
+
+    paintPlayerScrubPreview();
+
     return true;
+  }
+
+  function commitPlayerScrub() {
+    const slider =
+      playerScrubSlider &&
+      playerScrubSlider.isConnected
+        ? playerScrubSlider
+        : playerSlider(
+            playerPage()
+          );
+
+    if (
+      slider &&
+      playerScrubPreviewPercent !=
+        null
+    ) {
+      slider.value =
+        String(
+          playerScrubPreviewPercent
+        );
+
+      try {
+        /*
+         * Jellyfin's native OSD handles this event with
+         * playbackManager.seekPercent(), so one final commit works for direct
+         * play, transcoding and SyncPlay.
+         */
+        slider.dispatchEvent(
+          new Event(
+            'change',
+            {
+              bubbles:
+                true
+            }
+          )
+        );
+      } catch (_) {}
+    }
+
+    resetPlayerScrub();
+  }
+
+  function resetPlayerScrub() {
+    clearInterval(
+      playerScrubPreviewTimer
+    );
+
+    playerScrubPreviewTimer =
+      null;
+
+    playerScrubDirection =
+      null;
+
+    playerScrubStartedAt =
+      0;
+
+    playerScrubRepeats =
+      0;
+
+    playerScrubPreviewPercent =
+      null;
+
+    playerScrubSlider =
+      null;
   }
 
   function restoreFocusAfterBackNavigation(
@@ -11545,6 +13108,15 @@
 
     playerObserverRoot =
       null;
+
+    playerUpNextObserver
+      ?.disconnect();
+
+    playerUpNextObserver =
+      null;
+
+    playerUpNextObserverRoot =
+      null;
   }
 
   function ensurePlayerObserver(
@@ -11565,11 +13137,31 @@
       return;
     }
 
-    if (
+    const upNextRoot =
+      page.querySelector(
+        '.upNextContainer'
+      ) ||
+      document.querySelector(
+        '.upNextContainer'
+      );
+
+    const sameBottom =
       playerObserver &&
       playerObserverRoot ===
-      bottom &&
-      bottom.isConnected
+        bottom &&
+      bottom.isConnected;
+
+    const sameUpNext =
+      playerUpNextObserverRoot ===
+        upNextRoot &&
+      (
+        !upNextRoot ||
+        upNextRoot.isConnected
+      );
+
+    if (
+      sameBottom &&
+      sameUpNext
     ) {
       return;
     }
@@ -11579,15 +13171,21 @@
     playerObserverRoot =
       bottom;
 
+    playerUpNextObserverRoot =
+      upNextRoot;
+
     playerObserver =
       new MutationObserver(
         () => {
           if (
             zone ===
-            'player' &&
+              'player' &&
             playerSleeping(
               page
-            )
+            ) &&
+            !playerActionControls(
+              page
+            ).length
           ) {
             hideFocus();
           }
@@ -11605,6 +13203,85 @@
         ]
       }
     );
+
+    if (
+      upNextRoot
+    ) {
+      const syncUpNextFocus =
+        () => {
+          const actions =
+            playerUpNextControls();
+
+          if (
+            actions.length
+          ) {
+            zone =
+              'player';
+
+            playerLane =
+              'action';
+
+            if (
+              !actions.includes(
+                focusTarget
+              )
+            ) {
+              playerActionIndex =
+                0;
+            } else {
+              playerActionIndex =
+                Math.max(
+                  0,
+                  actions.indexOf(
+                    focusTarget
+                  )
+                );
+            }
+
+            showPlayerFocus();
+
+            return;
+          }
+
+          if (
+            playerLane ===
+              'action' &&
+            !playerSegmentSkipButton()
+          ) {
+            playerLane =
+              'bottom';
+
+            if (
+              playerSleeping(
+                page
+              )
+            ) {
+              hideFocus();
+            } else {
+              showPlayerFocus();
+            }
+          }
+        };
+
+      playerUpNextObserver =
+        new MutationObserver(
+          syncUpNextFocus
+        );
+
+      playerUpNextObserver.observe(
+        upNextRoot,
+        {
+          attributes:
+            true,
+
+          attributeFilter: [
+            'class'
+          ]
+        }
+      );
+
+      syncUpNextFocus();
+    }
   }
 
   function disconnectMediaObserver() {
@@ -11767,7 +13444,26 @@
           if ((!focusTarget || !focusTarget.isConnected) && !pendingHomeDown && !homeReturnPending) {
             if (zone === 'header') {
               rebuildHeaderTargets();
-              showFocusElement(headerTargets[headerIndex]);
+
+              const remembered =
+                findRememberedHeaderTarget();
+
+              if (remembered) {
+                headerIndex =
+                  headerTargets.indexOf(
+                    remembered
+                  );
+
+                showFocusElement(
+                  remembered
+                );
+              } else {
+                showFocusElement(
+                  headerTargets[
+                    headerIndex
+                  ]
+                );
+              }
             } else if (zone === 'library') {
               rebuildRows();
               if (rows.length) selectRow(rowIndex, cardIndex);
@@ -13520,6 +15216,125 @@
       return false;
     }
 
+    const upNextActions =
+      playerUpNextControls();
+
+    /*
+     * Up Next is independent of the normal OSD and usually appears while that
+     * OSD is hidden. Give the overlay first priority so D-pad input moves
+     * between Start Now / Hide instead of merely waking the player controls.
+     */
+    if (
+      upNextActions.length
+    ) {
+      consume(
+        event
+      );
+
+      playerLane =
+        'action';
+
+      playerActionIndex =
+        Math.max(
+          0,
+          Math.min(
+            playerActionIndex,
+            upNextActions.length -
+              1
+          )
+        );
+
+      if (
+        event.key ===
+          'ArrowLeft'
+      ) {
+        playerActionIndex =
+          Math.max(
+            0,
+            playerActionIndex -
+              1
+          );
+      } else if (
+        event.key ===
+          'ArrowRight'
+      ) {
+        playerActionIndex =
+          Math.min(
+            upNextActions.length -
+              1,
+            playerActionIndex +
+              1
+          );
+      } else if (
+        event.key ===
+          'ArrowDown'
+      ) {
+        playerLane =
+          'bottom';
+
+        wakePlayer(
+          page
+        );
+
+        return true;
+      } else if (
+        event.key ===
+          'Enter' ||
+        event.key ===
+          ' '
+      ) {
+        click(
+          upNextActions[
+            playerActionIndex
+          ]
+        );
+
+        playerLane =
+          'bottom';
+
+        setTimeout(
+          () => {
+            const live =
+              playerPage();
+
+            if (!live) {
+              hideFocus();
+              return;
+            }
+
+            if (
+              playerUpNextControls()
+                .length
+            ) {
+              playerLane =
+                'action';
+
+              showPlayerFocus();
+
+              return;
+            }
+
+            if (
+              playerSleeping(
+                live
+              )
+            ) {
+              hideFocus();
+            } else {
+              showPlayerFocus();
+            }
+          },
+          80
+        );
+
+        return true;
+      }
+
+      showPlayerFocus();
+
+      return true;
+    }
+
     if (
       playerSleeping(
         page
@@ -13628,26 +15443,45 @@
         event.key ===
         'ArrowUp'
       ) {
-        const top =
-          playerTopControls(
+        const actions =
+          playerActionControls(
             page
           );
 
         if (
-          top.length
+          actions.length
         ) {
           playerLane =
-            'top';
+            'action';
 
-          playerTopIndex =
-            Math.max(
-              0,
-              Math.min(
-                playerTopIndex,
-                top.length -
-                1
-              )
+          /*
+           * Segment skips are a single action. Jellyfin's Up Next DOM puts
+           * Start Now before Hide, so index zero is always the primary action.
+           */
+          playerActionIndex =
+            0;
+        } else {
+          const top =
+            playerTopControls(
+              page
             );
+
+          if (
+            top.length
+          ) {
+            playerLane =
+              'top';
+
+            playerTopIndex =
+              Math.max(
+                0,
+                Math.min(
+                  playerTopIndex,
+                  top.length -
+                    1
+                )
+              );
+          }
         }
       } else if (
         event.key ===
@@ -13669,26 +15503,154 @@
 
     if (
       playerLane ===
+      'action'
+    ) {
+      const actions =
+        playerActionControls(
+          page
+        );
+
+      if (!actions.length) {
+        playerLane =
+          'bottom';
+
+        showPlayerFocus();
+        return true;
+      }
+
+      playerActionIndex =
+        Math.max(
+          0,
+          Math.min(
+            playerActionIndex,
+            actions.length -
+              1
+          )
+        );
+
+      if (
+        event.key ===
+          'ArrowLeft'
+      ) {
+        playerActionIndex =
+          Math.max(
+            0,
+            playerActionIndex -
+              1
+          );
+      } else if (
+        event.key ===
+          'ArrowRight'
+      ) {
+        playerActionIndex =
+          Math.min(
+            actions.length -
+              1,
+            playerActionIndex +
+              1
+          );
+      } else if (
+        event.key ===
+          'ArrowDown'
+      ) {
+        playerLane =
+          'bottom';
+      } else if (
+        event.key ===
+          'ArrowUp'
+      ) {
+        const top =
+          playerTopControls(
+            page
+          );
+
+        if (
+          top.length
+        ) {
+          playerLane =
+            'top';
+
+          playerTopIndex =
+            Math.max(
+              0,
+              Math.min(
+                playerTopIndex,
+                top.length -
+                  1
+              )
+            );
+        }
+      } else if (
+        event.key ===
+          'Enter' ||
+        event.key ===
+          ' '
+      ) {
+        const target =
+          actions[
+            playerActionIndex
+          ];
+
+        click(
+          target
+        );
+
+        /*
+         * Skip/Start Now is transient. Return to the normal media-control
+         * lane immediately instead of leaving focus on a disappearing button.
+         */
+        playerLane =
+          'bottom';
+
+        setTimeout(
+          () => {
+            const live =
+              playerPage();
+
+            if (
+              live &&
+              !playerSleeping(
+                live
+              )
+            ) {
+              showPlayerFocus();
+            }
+          },
+          40
+        );
+
+        return true;
+      }
+
+      showPlayerFocus();
+
+      return true;
+    }
+
+    if (
+      playerLane ===
       'progress'
     ) {
       if (
         event.key ===
         'ArrowLeft'
       ) {
-        seekPlayer(
+        scrubPlayer(
           'left'
         );
       } else if (
         event.key ===
         'ArrowRight'
       ) {
-        seekPlayer(
+        scrubPlayer(
           'right'
         );
       } else if (
         event.key ===
         'ArrowUp'
       ) {
+        resetPlayerScrub();
+
         playerLane =
           'bottom';
       }
@@ -13743,8 +15705,23 @@
         event.key ===
         'ArrowDown'
       ) {
-        playerLane =
-          'bottom';
+        const actions =
+          playerActionControls(
+            page
+          );
+
+        if (
+          actions.length
+        ) {
+          playerLane =
+            'action';
+
+          playerActionIndex =
+            0;
+        } else {
+          playerLane =
+            'bottom';
+        }
       } else if (
         event.key ===
         'Enter' ||
@@ -14667,6 +16644,19 @@
   ) {
     if (
       event.key ===
+        'ArrowLeft' ||
+      event.key ===
+        'ArrowRight'
+    ) {
+      if (
+        playerScrubDirection
+      ) {
+        commitPlayerScrub();
+      }
+    }
+
+    if (
+      event.key ===
       'Enter'
     ) {
       finishEnterHold(
@@ -14785,6 +16775,8 @@
 
     backRepeatSeen =
       false;
+
+    resetPlayerScrub();
 
     clearTimeout(
       keyboardSearchTimer
@@ -14949,6 +16941,7 @@
 
             playerBottomIndex,
             playerTopIndex,
+            playerActionIndex,
 
             playerSleeping:
               playerSleeping(

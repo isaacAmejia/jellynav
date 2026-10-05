@@ -40,7 +40,7 @@ No other third-party plugin is required for core navigation.
 The current stable build is:
 
 ```text
-2026.10.03-r12.24.1
+v1
 ```
 
 It targets Jellyfin 12.1-era **Legacy / TV UI**.

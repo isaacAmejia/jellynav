@@ -1,112 +1,119 @@
 # JellyNav
 
-**JellyNav adds TV remote and D-pad navigation to Jellyfin Web, including Raspberry Pi and other living-room browser or webview setups.** It makes Jellyfin easier to control from a couch by adding predictable focus, remote-friendly Back behavior, and player controls without replacing Jellyfin or requiring a custom client.
+**JellyNav turns Jellyfin Web into a remote-friendly TV interface.**
 
-Trying to **control Jellyfin with a TV remote**, add **D-pad navigation**, or use **Jellyfin Web on a Raspberry Pi TV**? See [Jellyfin TV remote and D-pad navigation](docs/JELLYFIN_TV_REMOTE.md).
+It adds a consistent D-pad navigation layer on top of Jellyfin's existing Web UI so a browser, webview, Raspberry Pi, mini PC, or other living-room endpoint can be controlled comfortably with a TV-style remote instead of a mouse.
 
-> **Part of JellyPi** — a larger collection of independent Jellyfin projects built around a smoother living-room experience. JellyNav works on its own and also integrates with other JellyPi projects such as [JellyMark](https://github.com/isaacAmejia/jellymark).
+JellyNav does not replace Jellyfin, modify your media library, or require a custom Jellyfin client. It runs in the existing Jellyfin Web interface and adds focus management, directional navigation, and TV-oriented input behavior.
 
-## What it does
+> **Part of JellyPi** — a collection of independent projects focused on making self-hosted Jellyfin setups work more naturally in the living room. JellyNav can be used completely on its own.
 
-- Navigate Jellyfin with a D-pad or TV remote
-- Move through Home, libraries, Details, Search, dialogs, and the player
-- Start Details on **Play / Resume**
-- Navigate subtitle, audio, and settings popups in the player
-- Short **Back / Escape** returns to the current section instead of unexpectedly jumping away
-- Hold **Back / Escape** for about 900 ms to return Home
-- Hold **Enter / OK** for about 900 ms to refresh Jellyfin
-- Automatically follows Jellyfin's SPA page changes and restores focus
-- Optimized to avoid rebuilding navigation state on every keypress
+## Why JellyNav exists
 
-JellyNav is designed for **Jellyfin Web** running in a browser or webview, including dedicated TV endpoints such as a Raspberry Pi running Chromium.
+Jellyfin Web is primarily designed around mouse, touch, and conventional keyboard input. That works well on a computer, but it can feel inconsistent on a television where the only controls may be a D-pad, OK button, and Back button.
 
-## Install
+JellyNav provides one navigation model across the Web interface:
 
-JellyNav is a JavaScript frontend enhancement. The easiest way to load it is with [Jellyfin JavaScript Injector](https://github.com/n00bcodr/Jellyfin-JavaScript-Injector).
+- a clear visible selection
+- predictable directional movement
+- TV-style Back behavior
+- remote control of the player and overlays
+- navigation that follows Jellyfin as pages and dialogs change
 
-### Recommended: GitHub auto-update loader
+The goal is for Jellyfin Web to feel like a dedicated TV client while still keeping the flexibility of the Web interface.
 
-This keeps only a tiny loader in JavaScript Injector. Each new Jellyfin page load fetches the current stable JellyNav script from this repository's `main` branch with browser caching disabled.
+## Best use cases
 
-1. Install **JavaScript Injector** in Jellyfin.
+JellyNav is intended for devices that actually render **Jellyfin Web**, including:
+
+- Raspberry Pi TV endpoints
+- mini PCs and HTPCs
+- Chromium kiosk setups
+- browser-based living-room clients
+- webviews that can load injected Jellyfin Web JavaScript
+
+Your remote or input layer should produce normal browser key events for the directional buttons, Enter / OK, and Back / Escape.
+
+Native clients that do not render Jellyfin Web cannot run JellyNav.
+
+## Core controls
+
+| Remote input | Behavior |
+| --- | --- |
+| D-pad | Move through the current interface |
+| Enter / OK | Activate the selected item |
+| Back / Escape | Return to the previous logical area |
+| Hold Enter / OK | Refresh Jellyfin Web |
+| Hold Back / Escape | Return to Home |
+
+JellyNav also manages focus inside playback controls, dialogs, search, media rows, details pages, and other supported Web UI surfaces without requiring mouse input.
+
+## Installation
+
+JellyNav is loaded into Jellyfin Web with [Jellyfin JavaScript Injector](https://github.com/n00bcodr/Jellyfin-JavaScript-Injector).
+
+### Recommended: auto-update loader
+
+The recommended setup keeps a small loader in JavaScript Injector. The loader downloads the current stable JellyNav build from this repository whenever Jellyfin Web starts and keeps the last successful copy as a fallback.
+
+1. Install **JavaScript Injector** on your Jellyfin server.
 2. Open **Dashboard → Plugins → JavaScript Injector**.
-3. Add a new script named **JellyNav Loader**.
-4. Copy the full contents of [`install/remote-loader.js`](install/remote-loader.js).
-5. Paste it into the JavaScript Code field, enable it, and save.
-6. Disable/remove any older full JellyNav script entry.
+3. Create a script named **JellyNav Loader**.
+4. Copy the contents of [`install/remote-loader.js`](install/remote-loader.js).
+5. Paste it into the JavaScript Code field.
+6. Enable the script and save.
 7. Reload Jellyfin Web.
 
-After future stable JellyNav updates are pushed to `main`, reload Jellyfin Web to receive the new build. The loader keeps the last successfully downloaded build in browser storage as a fallback if GitHub is temporarily unreachable.
+Keep only one JellyNav installation enabled.
 
-Raw stable loader:
+### Manual installation
 
-`https://raw.githubusercontent.com/isaacAmejia/jellynav/main/install/remote-loader.js`
+If you prefer to control updates yourself:
 
-### Manual install
-
-If you prefer a pinned/manual copy instead of automatic updates:
-
-1. Add a new JavaScript Injector script named **JellyNav**.
+1. Create a JavaScript Injector entry named **JellyNav**.
 2. Copy the full contents of [`src/jellyfin-tv-navigation.js`](src/jellyfin-tv-navigation.js).
-3. Paste it into the JavaScript Code field, enable it, and save.
-4. Reload Jellyfin Web.
+3. Paste it into JavaScript Injector.
+4. Enable it and save.
+5. Reload Jellyfin Web.
 
-For Jellyfin 12, the JavaScript Injector repository is:
+More detailed setup instructions are available in [docs/INSTALLATION.md](docs/INSTALLATION.md).
 
-```text
-https://raw.githubusercontent.com/n00bcodr/jellyfin-plugins/main/12/manifest.json
-```
+## Requirements and compatibility
 
-The current stable release targets Jellyfin's **Legacy / TV** interface.
+The current stable release targets **Jellyfin 12 Legacy / TV Web UI**.
 
-For a more detailed walkthrough, see [Installation](docs/INSTALLATION.md).
+Required:
 
-## Remote controls
+- Jellyfin Web
+- JavaScript Injector
+- a client capable of receiving directional, Enter / OK, and Back / Escape key input
 
-| Remote action | JellyNav behavior |
-| --- | --- |
-| D-pad | Move between visible controls and media |
-| Enter / OK | Activate the current selection |
-| Back / Escape | Return to the parent area for the current section |
-| Hold Enter / OK | Refresh Jellyfin |
-| Hold Back / Escape | Universal Home |
+Optional Jellyfin Web customizations can coexist with JellyNav. The project includes compatibility handling for commonly used interfaces such as **SeerrFin, Jellyfin Enhanced, Media Bar, JellyMark, GlassFin, and Home Screen Sections**, but none of them are required for JellyNav itself.
 
-When focus is already on a top-level tab such as **Home**, **Movies**, **Shows**, or **Requests**, a short Back press does nothing. This prevents accidental navigation away from the section you are already using.
+See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) for current compatibility notes.
 
-## Optional integrations
+## Versioning
 
-JellyNav does **not** require these projects, but it knows how to work with them when installed.
-
-| Project | Integration |
-| --- | --- |
-| [JellyMark](https://github.com/isaacAmejia/jellymark) | Full TV navigation for the Watchlist UI, including Watchlist tabs, filters, Series Progress, history, statistics, and dialogs |
-| [SeerrFin](https://github.com/varunaditya-plus/SeerrFin) | Discovery tabs, media rows, provider/network grids, requests, Back, and Load More |
-| [Media Bar](https://github.com/IAmParadox27/jellyfin-plugin-media-bar) | Remote navigation for the Home Media Bar and slideshow controls |
-| [Jellyfin Enhanced](https://github.com/n00bcodr/Jellyfin-Enhanced) | Supported request/info UI and Enhanced pause-screen handling |
-| [GlassFin](https://github.com/KBH-Reeper/GlassFin) | Tested theme; not required |
-| [Home Screen Sections](https://github.com/IAmParadox27/jellyfin-plugin-home-sections) | Tested alongside JellyNav; not required |
-
-### JellyMark
-
-JellyMark is a **separate project**. Neither project depends on the other.
-
-If both are installed, JellyNav automatically recognizes JellyMark's Watchlist interface and provides TV navigation for it. JellyMark remains responsible for its own Watchlist data and optional sync service; JellyNav only handles navigation.
-
-## Current release
+The current stable release is:
 
 ```text
-2026.10.03-r12.24.1
+v1
 ```
 
-The stable `main` branch targets Jellyfin 12.1-era **Legacy / TV** UI. Modern UI work remains separate until it is ready for the same level of hands-on testing.
+JellyNav now uses simple public version numbers:
 
-You can verify the loaded version in the browser console:
+- **v1.1, v1.2, v1.3...** — normal fixes and incremental improvements
+- **v2, v3...** — larger releases with substantial behavior, compatibility, or architectural changes
+
+The older date/build-style version numbers are retired.
+
+To check the version currently loaded in Jellyfin, open the browser console and run:
 
 ```javascript
 window.__JELLYFIN_TV_REMOTE__?.version
 ```
 
-For diagnostics:
+For diagnostic state information:
 
 ```javascript
 window.__JELLYFIN_TV_REMOTE__?.state?.()
@@ -114,49 +121,49 @@ window.__JELLYFIN_TV_REMOTE__?.state?.()
 
 ## Updating
 
-If you use the recommended **JellyNav Loader**, no script replacement is needed. Once a stable change is pushed to `main`, reload Jellyfin Web and the loader fetches it automatically.
+If you use the recommended loader, simply reload Jellyfin Web after a new stable build is published to `main`.
 
-If you installed the full script manually, replace the existing Injector entry with the newest [`src/jellyfin-tv-navigation.js`](src/jellyfin-tv-navigation.js), save, and reload.
+If you installed JellyNav manually, replace your existing injected script with the latest [`src/jellyfin-tv-navigation.js`](src/jellyfin-tv-navigation.js).
 
-Keep only **one enabled JellyNav entry**: either the loader or the full script, never both.
+Do not run multiple JellyNav revisions at the same time.
 
-## Compatibility
+## Project structure
 
-JellyNav currently targets clients that actually render Jellyfin Web. Native clients that do not run injected Jellyfin Web JavaScript are outside the scope of this project.
+- `src/` — stable JellyNav source
+- `install/` — lightweight installation loader
+- `docs/` — installation, compatibility, and project documentation
 
-See [Compatibility](docs/COMPATIBILITY.md) for the full matrix and [Modern UI Roadmap](docs/MODERN_UI_ROADMAP.md) for future layout work.
+The `main` branch is intended to remain the stable release line. Experimental work should be tested separately before being promoted to `main`.
 
 ## Troubleshooting
 
-If JellyNav does not load:
+If JellyNav does not appear to be working:
 
-- confirm JavaScript Injector is enabled
-- confirm the complete script was pasted
-- make sure only one JellyNav/navigation script is enabled
-- fully reload the Web client
-- confirm the client is using the supported Legacy / TV layout
+1. confirm JavaScript Injector is enabled
+2. confirm only one JellyNav script or loader is active
+3. fully reload the Jellyfin Web client
+4. verify the loaded version in the browser console
+5. confirm the client is using a supported Jellyfin Web layout
 
-If a page or popup navigates incorrectly, open an issue in this repository with the Jellyfin version, page involved, optional UI plugins/themes installed, and what the remote did versus what you expected.
+When reporting a problem, include the Jellyfin version, browser/client type, any relevant Web UI plugins or themes, and a short description of what the remote did versus what you expected.
 
 ## JellyPi
 
-JellyNav is one part of **JellyPi**, a broader set of independent Jellyfin tools aimed at making a self-hosted TV setup feel more cohesive.
+JellyNav is part of the broader **JellyPi** project family, but it is intentionally independent. You can use JellyNav on any compatible Jellyfin Web endpoint without adopting the rest of JellyPi.
 
-The projects are intentionally modular: install only the parts you want. JellyNav focuses on **TV navigation**; projects such as JellyMark solve different problems and simply cooperate when installed together.
+[JellyMark](https://github.com/isaacAmejia/jellymark) is another independent JellyPi project and can coexist with JellyNav when both are installed.
 
 ## Project status
 
 **Active development.**
 
-- `main`: stable Legacy / TV build
-- `develop/modern-ui`: Modern UI development
-- older revisions remain available in Git history
+The stable focus is a reliable living-room navigation experience for Jellyfin Web. Support for substantially different Jellyfin layouts is developed separately so experimental work does not destabilize the main TV navigation experience.
 
-JellyNav is a community customization and is not affiliated with or endorsed by Jellyfin or the third-party projects listed above.
+JellyNav is a community customization and is not affiliated with or endorsed by Jellyfin or the third-party projects mentioned above.
 
 ## AI disclosure
 
-JellyNav was developed with OpenAI ChatGPT generating and revising code and documentation under human direction and hands-on testing. See [AI Disclosure](docs/AI_DISCLOSURE.md).
+JellyNav was developed with OpenAI ChatGPT assisting with code and documentation under human direction and hands-on testing. See [docs/AI_DISCLOSURE.md](docs/AI_DISCLOSURE.md).
 
 ## License
 

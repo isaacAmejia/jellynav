@@ -85,7 +85,7 @@ window.__JELLYFIN_TV_REMOTE__?.version
 The stable build should report:
 
 ```text
-2026.10.03-r12.24.1
+v1
 ```
 
 For more diagnostic information:
@@ -202,14 +202,14 @@ The stable build is for **Legacy / TV**. Confirm the client is not using Jellyfi
 First confirm the current version reports:
 
 ```text
-2026.10.03-r12.24.1
+v1
 ```
 
 This maintenance build specifically adds Home startup focus settling.
 
 ### Details starts on Back instead of Play / Resume
 
-Confirm the same r12.24.1 build is loaded. It explicitly prioritizes Jellyfin's visible Play/Resume control when a Details page opens.
+Confirm the same v1 build is loaded. It explicitly prioritizes Jellyfin's visible Play/Resume control when a Details page opens.
 
 ### A selection remains behind a popup
 
@@ -221,7 +221,7 @@ This usually means more than one navigation script revision is being injected. K
 
 ### SeerrFin provider/network page does not navigate
 
-Confirm the stable r12.24.1 build is installed. These full-grid pages were added in the maintenance release.
+Confirm the stable v1 build is installed. These full-grid pages were added in the maintenance release.
 
 ### Media Bar does not autoplay
 

@@ -1,159 +1,74 @@
 # Changelog
 
-## Release — r12.24.1
+This changelog tracks **public JellyNav releases**.
 
-Internal version: `2026.10.03-r12.24.1`
+JellyNav uses simple version numbers:
 
-Major navigation-stability release for the Legacy / TV interface.
+- **v1.1, v1.2, v1.3...** for normal fixes and incremental improvements
+- **v2, v3...** for larger releases with substantial new behavior, compatibility changes, or architectural work
 
-- Adds per-row navigation memory:
-  - a row visited for the first time starts on its first card
-  - returning to a previously visited row restores that row's own selected card
-  - each row also restores its own horizontal Jellyfin carousel position
-- Uses Jellyfin's native `emby-scroller` APIs for horizontal movement, including transform-mode carousels, so Left/Right movement no longer depends on plain `scrollLeft`.
-- Keeps vertical page position isolated from horizontal carousel movement.
-- Improves Home lazy loading:
-  - rapid repeated Down keeps one pending move alive
-  - same-route Home DOM replacement no longer cancels the pending move
-  - newly mounted rows are recovered by stable media identity
-- Refines SeerrFin Discover navigation:
-  - Movies, Shows, and Settings form one logical TV-control row
-  - Requests is skipped by D-pad navigation
-  - Down enters the first media row without scrolling the Discover controls
-- Jellyfin Search now buffers TV-keyboard input locally and does not trigger Jellyfin search until the on-screen **SEARCH** button is pressed.
-- Jellyfin Enhanced request flows now support both the initial Request / Request More control and the final request confirmation button.
-- Focus-ring handoff is immediate during rapid navigation so a valid selection does not disappear between animation frames.
-- JellyMark navigation is hierarchical:
-  - content / controls → active Watchlist sub-tab
-  - sub-tab → main Watchlist tab
-  - short Back on the main Watchlist tab does nothing
-  - long Back remains Universal Home
-- Adds hardware-sensitive Back handling so delayed keyup events from CEC/remapped remotes are not misread as a Watchlist long press without actual repeat events.
-- Preserves 900 ms hold Enter / OK refresh and 900 ms hold Back / Escape Universal Home outside the Watchlist timing guard.
-- Maintains player OSD, ActionSheet, Enhanced pause-screen, Details Play/Resume, native library, SeerrFin grid, and Universal Home behavior from earlier stable releases.
-- Compatible with the independent JellyMark project, including JellyMark 3.2.2's persistent top-level Watchlist tab and delegated Back ownership.
+Earlier development builds used internal date-based and `r12.x` identifiers. Those builds were part of the testing process leading to v1 and remain available in Git history, but they are no longer treated as public release versions.
 
-## Release — r12.19
+---
 
-Internal version: `2026.09.30-r12.19-jellymark-compatibility`
+## v1 — Initial public release
 
-First release under the **JellyNav** name.
+JellyNav v1 establishes the first stable public release of the project's TV navigation layer for Jellyfin Web.
 
-- Restores the fully tested JellyMark compatibility layer from staging while keeping JellyMark completely independent.
-- JellyNav automatically recognizes JellyMark's Watchlist UI when both projects are installed; neither project is required by the other.
-- Adds deterministic remote navigation across JellyMark's main Watchlist tab, sub-tabs, filters, Watch History, Statistics, dialogs, and Series Progress.
-- Series Progress uses one logical selection per series row: the whole row is outlined, the Mark Watched / Mark Unplayed action is outlined at the same time, and Enter activates that action.
-- Preserves the active-main-tab Back fix so returning from sub-areas highlights the section actually on screen instead of a stale previous tab.
-- Keeps short Back/Escape inert on top-level tabs while sub-areas return to their parent section.
-- Preserves 900 ms hold Enter/OK refresh and 900 ms hold Back/Escape Universal Home.
-- Includes the r12.18 performance work: cached visual geometry, reduced duplicate DOM scans, and dirty-state caching for Watchlist/native-library navigation models.
-- Rebrands user-facing documentation and console logging as JellyNav.
-- Documents JellyNav as one independent component of the larger **JellyPi** project alongside JellyMark.
-## Release — r12.18.1
+### Navigation
 
-Internal version: `2026.09.30-r12.18.1`
+- Adds consistent D-pad navigation across supported Jellyfin Web surfaces.
+- Provides a visible navigation focus that follows the currently selected control or media item.
+- Supports Home, media libraries, item details, Search, dialogs, overlays, and playback controls.
+- Keeps horizontal media-row movement and vertical page movement predictable for remote use.
+- Handles asynchronous Jellyfin page and UI changes without requiring a mouse to recover navigation.
+- Uses TV-oriented Back behavior so navigation returns to the appropriate parent area rather than relying only on browser history.
 
-Major Legacy/TV navigation and performance release.
+### Remote controls
 
-- Promotes the optimized staging navigation architecture to `main`.
-- Short Back/Escape is now parent-aware:
-  - top-level Home / Movies / Shows / Requests tabs do nothing on short Back
-  - sub-areas return to their owning main tab or parent area
-  - downloaded Movies and Shows libraries are treated as Home subsections and return Home
-  - Details opened from a main section restore that section instead of relying on stale browser history
-- Main-tab focus now resolves from the actually active Jellyfin tab before falling back to remembered ancestry, preventing stale selection highlights after switching between tabs.
-- Long-press behavior remains unchanged:
-  - hold Enter / OK for 900 ms to refresh
-  - hold Back / Escape for 900 ms for Universal Home
-- Player behavior includes:
-  - hidden-OSD Enter pause/resume behavior
-  - player ActionSheet navigation for subtitles, audio, and settings
-  - Jellyfin Enhanced pause-screen recovery
-  - startup shielding so the previous page is not exposed while the player mounts
-- Details now prefer visible Play / Resume on entry and restore that selection after returning from playback.
-- Universal Home was hardened for late SPA mounts and same-route plugin states.
-- Native downloaded-library navigation, SeerrFin grids, Home, Details, player controls, dialogs, and headers received broad performance optimization.
-- Repeated layout work was reduced by caching element geometry during visual sorting.
-- Duplicate DOM scans and header/card rebuilds were removed where possible.
-- Native-library navigation models now rebuild only when their DOM changes instead of on every D-pad press.
-- The public build intentionally excludes unreleased companion-integration code. A separate companion integration is planned and will be documented when ready.
+- D-pad moves through the active interface.
+- Enter / OK activates the current selection.
+- Back / Escape returns to the previous logical area.
+- Holding Enter / OK refreshes Jellyfin Web.
+- Holding Back / Escape returns to Home.
 
-## Maintenance — r12.12.2
+### Playback
 
-Internal version: `2026.09.30-r12.12.2-seerr-grid-navigation`
+- Adds D-pad navigation to Jellyfin's player controls.
+- Supports playback settings and action sheets such as audio and subtitle selection.
+- Supports timeline navigation and remote-friendly scrubbing.
+- Supports transient playback actions such as media-segment skip controls.
+- Supports Jellyfin's Up Next overlay, including navigation between **Start Now** and **Hide**.
+- Preserves navigation as player overlays appear and disappear.
 
-Legacy/TV SeerrFin grid correction.
+### Jellyfin Web integration
 
-- SeerrFin provider/network browse grids now start on the **first real card** once asynchronous card loading completes instead of preserving the temporary Back selection from the empty grid shell.
-- D-pad movement in these grids now scrolls the **actual Jellyfin page** to keep the selected card and Load More button visible.
-- Moving back to grid/header chrome scrolls the page back to the top.
-- Universal Home (hold Back/Escape) now closes an active same-page SeerrFin grid through SeerrFin's own Back control before continuing the normal Home action.
-- This maintenance pass was applied to the stable Legacy/TV branch only; Modern UI development remains separate.
+- Details pages enter with a useful primary action selected.
+- Search can be operated from a remote-oriented on-screen keyboard workflow.
+- Native Jellyfin dialogs and controls participate in the same navigation model.
+- Navigation follows Jellyfin's SPA lifecycle as pages are mounted, replaced, or restored.
 
-## Maintenance — r12.12.1
+### Optional integrations
 
-Internal version: `2026.09.30-r12.12.1-home-seerr-maintenance`
+JellyNav can detect and cooperate with several optional Jellyfin Web customizations when they are installed, including:
 
-Stable maintenance update on top of the accepted r12.12 architecture.
+- JellyMark
+- SeerrFin
+- Jellyfin Enhanced
+- Media Bar
+- GlassFin
+- Home Screen Sections
 
-- Home now prefers Media Bar **Play** as its startup/return selection and retries while Media Bar mounts.
-- Home keeps a temporary visible fallback selection instead of loading with no focus.
-- A real D-pad input cancels the Home startup retry so late plugin rendering cannot steal focus.
-- SeerrFin full-grid/provider pages now automatically claim the first poster and include the grid Back button, top tabs, all loaded cards, and Load More in D-pad navigation.
-- Details explicitly prefer Jellyfin's visible `.mainDetailButtons .btnPlay` Play/Resume control on entry.
-- The same fixes were carried to the Modern development branch.
+These integrations are optional. JellyNav's core navigation does not require them.
 
-## Final — r12.12
+### Installation and updates
 
-Internal version: `2026.09.29-r12.12-auto-context-focus`
+- Supports direct installation through Jellyfin JavaScript Injector.
+- Includes a lightweight loader that can fetch the current stable build from the repository's `main` branch.
+- The loader retains the last successfully fetched build as a fallback.
 
-Final accepted build.
+### Project scope
 
-Highlights:
+v1 targets **Jellyfin 12 Legacy / TV Web UI** on clients that actually render Jellyfin Web, such as browser, kiosk, webview, Raspberry Pi, and HTPC-style endpoints.
 
-- Automatically re-resolves navigation context when Jellyfin mounts new UI.
-- Prevents stale/ghost focus from remaining visible behind newly opened overlays.
-- Native Jellyfin dialogs now claim navigation focus automatically.
-- Restores the underlying context when supported overlays close.
-- Preserves the single-ring far-jump focus animation from r12.11.
-- Preserves native Media Bar `window.slideshowPure` integration.
-
-## r12.11
-
-- Replaced multi-layer focus handoff effects with one real focus ring.
-- Large jumps use a short opacity/glow arrival.
-- Nearby navigation remains immediate.
-- Removed cloned/scaled focus rectangles that could fight Jellyfin scrolling/layout.
-
-## r12.10
-
-- Limited the stronger focus effect to far-distance navigation.
-- Superseded by the simpler r12.11 focus architecture.
-
-## r12.9
-
-- Experimented with a stronger focus pop/overshoot.
-- Rejected because applying the effect too broadly made ordinary navigation feel busy.
-
-## r12.8
-
-- Removed obsolete Media Bar Enhanced assumptions.
-- Integrated with the actual Media Bar plugin through `window.slideshowPure`.
-- Preserved fixes for late Home rows and native library initial focus.
-
-## r12.7
-
-- Experimented with source/destination focus handoff animation.
-- Later replaced by the single-ring design.
-
-## r12.6
-
-- Improved Home row settling after Media Bar navigation.
-- Improved initial Movies/TV library focus.
-- Included an earlier focus-transition experiment.
-
-## r12.5 and earlier
-
-Development builds that established the core navigation model, detail-page behavior, SeerrFin handling, native library navigation, player controls, and long-press remote actions.
-
-Older source revisions remain available in Git history rather than the final working tree.
+Native Jellyfin clients that do not execute injected Jellyfin Web JavaScript are outside JellyNav's scope.

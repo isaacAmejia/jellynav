@@ -92,31 +92,6 @@ Optional Jellyfin Web customizations can coexist with JellyNav. The project incl
 
 See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) for current compatibility notes.
 
-## Versioning
-
-The current stable release is:
-
-```text
-v1
-```
-
-JellyNav now uses simple public version numbers:
-
-- **v1.1, v1.2, v1.3...** — normal fixes and incremental improvements
-- **v2, v3...** — larger releases with substantial behavior, compatibility, or architectural changes
-
-The older date/build-style version numbers are retired.
-
-To check the version currently loaded in Jellyfin, open the browser console and run:
-
-```javascript
-window.__JELLYFIN_TV_REMOTE__?.version
-```
-
-For diagnostic state information:
-
-```javascript
-window.__JELLYFIN_TV_REMOTE__?.state?.()
 ```
 
 ## Updating

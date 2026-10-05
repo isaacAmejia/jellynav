@@ -92,7 +92,6 @@ Optional Jellyfin Web customizations can coexist with JellyNav. The project incl
 
 See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) for current compatibility notes.
 
-```
 
 ## Updating
 

@@ -1,16 +1,5 @@
 # Changelog
 
-This changelog tracks **public JellyNav releases**.
-
-JellyNav uses simple version numbers:
-
-- **v1.1, v1.2, v1.3...** for normal fixes and incremental improvements
-- **v2, v3...** for larger releases with substantial new behavior, compatibility changes, or architectural work
-
-Earlier development builds used internal date-based and `r12.x` identifiers. Those builds were part of the testing process leading to v1 and remain available in Git history, but they are no longer treated as public release versions.
-
----
-
 ## v1 — Initial public release
 
 JellyNav v1 establishes the first stable public release of the project's TV navigation layer for Jellyfin Web.

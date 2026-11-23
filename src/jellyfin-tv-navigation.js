@@ -5152,7 +5152,37 @@
     };
   }
 
+  /*
+   * JellyStream service pages hide the Media Bar and show their own billboard in
+   * its place (Play / More Info / Back to Home). Treat those buttons as the media
+   * zone so Up from the first row reaches them, and the header beyond.
+   */
+  function jellyStreamBillboardControls() {
+    if (
+      !document.documentElement.classList.contains(
+        'js-service-open'
+      )
+    ) {
+      return null;
+    }
+
+    return [
+      ...document.querySelectorAll(
+        '.js-view .js-bb .js-bb-btn, .js-view .js-bb .js-back'
+      )
+    ].filter(
+      visible
+    );
+  }
+
   function getMediaControls() {
+    const jellyStream =
+      jellyStreamBillboardControls();
+
+    if (jellyStream) {
+      return jellyStream;
+    }
+
     const media =
       getMediaBar();
 
@@ -5384,6 +5414,17 @@
   }
 
   function activateMediaControl() {
+    const jellyStream =
+      jellyStreamBillboardControls();
+
+    if (jellyStream) {
+      jellyStream[
+        mediaControlIndex
+      ]?.click();
+
+      return;
+    }
+
     const media =
       getMediaBar();
 
@@ -16352,9 +16393,17 @@
         rowIndex ===
         0
       ) {
-        enterMediaBar(
-          false
-        );
+        // No visible banner (hidden, or not installed): go to the header
+        // instead of leaving the selection stuck on the first row.
+        if (
+          !enterMediaBar(
+            false
+          )
+        ) {
+          enterHeader(
+            true
+          );
+        }
       } else {
         selectVerticalRow(
             rowIndex -

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Up from the first Home row now moves to the header when no Media Bar banner is visible, instead of staying on the row.
+- JellyStream service pages: their billboard buttons (Play, More Info, Back to Home) are reachable with Up from the first row, the same way as the Media Bar.
+
 ## v1 — Initial public release
 
 JellyNav v1 establishes the first stable public release of the project's TV navigation layer for Jellyfin Web.

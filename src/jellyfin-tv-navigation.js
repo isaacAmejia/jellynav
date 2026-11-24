@@ -4098,6 +4098,20 @@
       );
   }
 
+  /*
+   * Optional hook for pages that position rows/cards themselves.
+   * window.JellyStream.navScroll(kind, element, { row, scroller, direction })
+   * returns true when it handled the scroll.
+   */
+  function externalNavScroll(kind, element, row, scroller = null, direction = null) {
+    try {
+      const hook = window.JellyStream?.navScroll;
+      return typeof hook === 'function' && hook(kind, element, { row: row?.container || null, scroller, direction }) === true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   function getVerticalScrollerForRow(
     row
   ) {
@@ -4154,10 +4168,116 @@
     );
   }
 
+  /*
+   * Pinned selection (Netflix-style): the selected row always settles at the
+   * same height under the header, and the selected card at the row's left
+   * edge. The rows and cards slide; the selection itself stays put.
+   * The first row keeps the plain "stay visible" behavior so the Media Bar /
+   * banner above it remains on screen.
+   */
+  function pinAnchorTop() {
+    const header = document.querySelector('.skinHeader');
+    let top = 0;
+    if (header) {
+      const style = getComputedStyle(header);
+      const rect = header.getBoundingClientRect();
+      if ((style.position === 'fixed' || style.position === 'sticky') && rect.height && rect.bottom > 0 && style.visibility !== 'hidden' && style.display !== 'none') {
+        top = rect.bottom;
+      }
+    }
+    return Math.max(top, 0) + Math.round(innerHeight * 0.025);
+  }
+
+  function pinRowVertically(row) {
+    if (!row?.container || rows.indexOf(row) === 0) {
+      return false;
+    }
+    const scroller = getVerticalScrollerForRow(row);
+    if (!scroller) {
+      return false;
+    }
+    const target = row.container.closest('.verticalSection, .homeSection, .js-section') || row.container;
+    const settle = () => {
+      const rect = target.getBoundingClientRect();
+      const scrollerTop = scroller === document.scrollingElement ? 0 : scroller.getBoundingClientRect().top;
+      const anchor = Math.max(pinAnchorTop(), scrollerTop);
+      const delta = rect.top - anchor;
+      if (Math.abs(delta) > 1) {
+        const top = Math.max(0, scroller.scrollTop + delta);
+        try {
+          scroller.scrollTo({ top, behavior: 'smooth' });
+        } catch (_) {
+          scroller.scrollTop = top;
+        }
+      }
+    };
+    settle();
+    /*
+     * Cards in the old/new row may still be animating (e.g. expanding focus
+     * cards); once they finish, correct any small drift so every row lands on
+     * exactly the same line.
+     */
+    clearTimeout(pinRowVertically.timer);
+    pinRowVertically.timer = setTimeout(() => {
+      if (rows[rowIndex] === row && target.isConnected) {
+        settle();
+      }
+    }, 420);
+    return true;
+  }
+
+  function pinCardHorizontally(row, card, scroller) {
+    const items = row?.container;
+    if (!items || !card) {
+      return false;
+    }
+    const first = row.cards?.[0];
+    const current = rowScrollPosition(row);
+    if (!first || !Number.isFinite(current)) {
+      return false;
+    }
+    const viewportRect = scroller.getBoundingClientRect();
+    // where the first card sits when the row is at the start = the pinned spot
+    const inset = first.getBoundingClientRect().left - viewportRect.left + current;
+    const delta = card.getBoundingClientRect().left - (viewportRect.left + inset);
+    if (Math.abs(delta) <= 1) {
+      return true;
+    }
+    const native = typeof scroller.scrollToPosition !== 'function' && typeof scroller.scroller?.slideTo !== 'function';
+    const max = native ? Math.max(0, scroller.scrollWidth - scroller.clientWidth) : Infinity;
+    const position = Math.max(0, Math.min(current + delta, max));
+    try {
+      if (typeof scroller.scrollToPosition === 'function') {
+        scroller.scrollToPosition(position, false);
+        return true;
+      }
+      if (typeof scroller.scroller?.slideTo === 'function') {
+        scroller.scroller.slideTo(position, false);
+        return true;
+      }
+      scroller.scrollTo({ left: position, behavior: 'smooth' });
+      return true;
+    } catch (_) {
+      return setRowScrollPosition(row, position);
+    }
+  }
+
   function ensureRowVisible(
     row
   ) {
     if (!row) {
+      return;
+    }
+
+    /*
+     * Pages that pin rows themselves (JellyStream's streaming-service pages)
+     * take over vertical alignment so the movement isn't applied twice.
+     */
+    if (externalNavScroll('row', row.container, row)) {
+      return;
+    }
+
+    if (pinRowVertically(row)) {
       return;
     }
 
@@ -4310,6 +4430,14 @@
       !card
     ) {
       return false;
+    }
+
+    if (externalNavScroll('card', card, row, scroller, direction)) {
+      return true;
+    }
+
+    if (pinCardHorizontally(row, card, scroller)) {
+      return true;
     }
 
     if (

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `jellynav:reset` accepts `detail.focus` to select a specific element after a page swaps its content.
+
 - Added a `jellynav:reset` event: pages that swap the whole home screen can ask JellyNav to forget each row's remembered card and return the selection to the top.
 
 - Up from the first Home row now moves to the header when no Media Bar banner is visible, instead of staying on the row.

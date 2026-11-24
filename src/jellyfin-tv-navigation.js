@@ -17229,7 +17229,29 @@
    */
   document.addEventListener(
     'jellynav:reset',
-    () => {
+    (event) => {
+      /*
+       * detail.focus: an element to select once the new rows are read
+       * (a page that swapped its content, e.g. JellyStream's library view)
+       */
+      const focusEl = event?.detail?.focus;
+      if (focusEl && focusEl.isConnected) {
+        homeMediaSettleToken++;
+        homeRowSettleToken++;
+        homeOrigin = null;
+        homeReturnPending = false;
+        const pick = () => {
+          rebuildRows();
+          const index = rows.findIndex(row => row.cards.some(card => card === focusEl || card.contains(focusEl) || focusEl.contains(card)));
+          if (index < 0) return false;
+          const card = rows[index].cards.findIndex(c => c === focusEl || c.contains(focusEl) || focusEl.contains(c));
+          zone = 'library';
+          selectRow(index, Math.max(0, card));
+          return true;
+        };
+        if (!pick()) setTimeout(pick, 120);
+        return;
+      }
       rowNavigationMemory.clear();
       homeOrigin = null;
       homeReturnPending = false;

@@ -4103,6 +4103,23 @@
    * window.JellyStream.navScroll(kind, element, { row, scroller, direction })
    * returns true when it handled the scroll.
    */
+  /*
+   * Tell page scripts which card is about to be selected, before the row
+   * moves. Scripts that open cards (Top 10 expand, JellyStream) close the old
+   * one here, so the row slides once against its final layout.
+   * Listen with: document.addEventListener('jellynav:select', (e) => e.detail.card)
+   */
+  let lastAnnounced = null;
+  function announceSelection(card, row, direction) {
+    if (card === lastAnnounced && card.isConnected) {
+      return;
+    }
+    lastAnnounced = card;
+    try {
+      document.dispatchEvent(new CustomEvent('jellynav:select', { detail: { card, row: row?.container || null, direction } }));
+    } catch (_) {}
+  }
+
   function externalNavScroll(kind, element, row, scroller = null, direction = null) {
     try {
       const hook = window.JellyStream?.navScroll;
@@ -4226,6 +4243,26 @@
     return true;
   }
 
+  // the usual distance between neighbouring cards, ignoring any that are opened up wider (null if the row isn't evenly spaced)
+  function restingPitch(cards) {
+    if (!cards || cards.length < 4) {
+      return 0;
+    }
+    // layout positions (offsetLeft), so slide animations running on the cards don't skew the spacing
+    const lefts = cards.map((c) => c.offsetLeft);
+    const gaps = [];
+    for (let i = 0; i + 1 < lefts.length; i++) {
+      gaps.push(Math.round(lefts[i + 1] - lefts[i]));
+    }
+    const sorted = gaps.filter((g) => g > 0).sort((a, b) => a - b);
+    if (sorted.length < 3) {
+      return 0;
+    }
+    const median = sorted[Math.floor(sorted.length / 2)];
+    const even = sorted.filter((g) => Math.abs(g - median) <= 2).length;
+    return even >= Math.max(3, sorted.length - 3) ? median : 0;
+  }
+
   function pinCardHorizontally(row, card, scroller) {
     const items = row?.container;
     if (!items || !card) {
@@ -4239,12 +4276,31 @@
     const viewportRect = scroller.getBoundingClientRect();
     // where the first card sits when the row is at the start = the pinned spot
     const inset = first.getBoundingClientRect().left - viewportRect.left + current;
-    const delta = card.getBoundingClientRect().left - (viewportRect.left + inset);
+    let delta = card.getBoundingClientRect().left - (viewportRect.left + inset);
+    /*
+     * Rows whose selected card grows (Top 10 expand, JellyStream) are mid-change
+     * when this runs: the old card is still open and the new one hasn't opened.
+     * Pin against the row's resting spacing instead, so the selected card lands
+     * on the pinned spot once those changes finish rather than overshooting.
+     */
+    const index = row.cards.indexOf(card);
+    const pitch = restingPitch(row.cards);
+    if (pitch && index >= 0) {
+      delta = index * pitch - current;
+    }
     if (Math.abs(delta) <= 1) {
       return true;
     }
     const native = typeof scroller.scrollToPosition !== 'function' && typeof scroller.scroller?.slideTo !== 'function';
-    const max = native ? Math.max(0, scroller.scrollWidth - scroller.clientWidth) : Infinity;
+    let max = native ? Math.max(0, scroller.scrollWidth - scroller.clientWidth) : Infinity;
+    if (native && pitch && row.cards.length > 1) {
+      // a card that is open right now makes the row longer than it will be once it closes; aim for the resting end
+      const cards = row.cards;
+      const extra = (cards[cards.length - 1].offsetLeft - cards[0].offsetLeft) - (cards.length - 1) * pitch;
+      if (extra > 2) {
+        max = Math.max(0, max - extra);
+      }
+    }
     const position = Math.max(0, Math.min(current + delta, max));
     try {
       if (typeof scroller.scrollToPosition === 'function') {
@@ -4431,6 +4487,8 @@
     ) {
       return false;
     }
+
+    announceSelection(card, row, direction);
 
     if (externalNavScroll('card', card, row, scroller, direction)) {
       return true;

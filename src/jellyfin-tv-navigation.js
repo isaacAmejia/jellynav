@@ -4243,26 +4243,6 @@
     return true;
   }
 
-  // the usual distance between neighbouring cards, ignoring any that are opened up wider (null if the row isn't evenly spaced)
-  function restingPitch(cards) {
-    if (!cards || cards.length < 4) {
-      return 0;
-    }
-    // layout positions (offsetLeft), so slide animations running on the cards don't skew the spacing
-    const lefts = cards.map((c) => c.offsetLeft);
-    const gaps = [];
-    for (let i = 0; i + 1 < lefts.length; i++) {
-      gaps.push(Math.round(lefts[i + 1] - lefts[i]));
-    }
-    const sorted = gaps.filter((g) => g > 0).sort((a, b) => a - b);
-    if (sorted.length < 3) {
-      return 0;
-    }
-    const median = sorted[Math.floor(sorted.length / 2)];
-    const even = sorted.filter((g) => Math.abs(g - median) <= 2).length;
-    return even >= Math.max(3, sorted.length - 3) ? median : 0;
-  }
-
   function pinCardHorizontally(row, card, scroller) {
     const items = row?.container;
     if (!items || !card) {
@@ -4278,29 +4258,21 @@
     const inset = first.getBoundingClientRect().left - viewportRect.left + current;
     let delta = card.getBoundingClientRect().left - (viewportRect.left + inset);
     /*
-     * Rows whose selected card grows (Top 10 expand, JellyStream) are mid-change
-     * when this runs: the old card is still open and the new one hasn't opened.
-     * Pin against the row's resting spacing instead, so the selected card lands
-     * on the pinned spot once those changes finish rather than overshooting.
+     * Use layout positions (offsetLeft), not on-screen ones: rows whose
+     * selected card opens wider (Top 10 expand, JellyStream) run slide
+     * animations while this happens, and on-screen positions include them.
+     * Works for uneven rows too (Top 10 rank numbers make every card a
+     * different width).
      */
     const index = row.cards.indexOf(card);
-    const pitch = restingPitch(row.cards);
-    if (pitch && index >= 0) {
-      delta = index * pitch - current;
+    if (index >= 0) {
+      delta = (card.offsetLeft - first.offsetLeft) - current;
     }
     if (Math.abs(delta) <= 1) {
       return true;
     }
     const native = typeof scroller.scrollToPosition !== 'function' && typeof scroller.scroller?.slideTo !== 'function';
     let max = native ? Math.max(0, scroller.scrollWidth - scroller.clientWidth) : Infinity;
-    if (native && pitch && row.cards.length > 1) {
-      // a card that is open right now makes the row longer than it will be once it closes; aim for the resting end
-      const cards = row.cards;
-      const extra = (cards[cards.length - 1].offsetLeft - cards[0].offsetLeft) - (cards.length - 1) * pitch;
-      if (extra > 2) {
-        max = Math.max(0, max - extra);
-      }
-    }
     const position = Math.max(0, Math.min(current + delta, max));
     try {
       if (typeof scroller.scrollToPosition === 'function') {

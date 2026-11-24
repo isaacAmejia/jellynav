@@ -7,6 +7,7 @@
 - Pinned selection everywhere: moving up or down settles the selected row at the same height under the header, and moving left or right keeps the selected card at the row's left edge while the row slides. The first row keeps the Media Bar in view.
 - Pages can take over row and card scrolling through `window.JellyStream.navScroll` (used by JellyStream's widening Netflix cards).
 - Pinned rows that open their selected card wider (Top 10 expand, JellyStream) now slide straight to the pinned spot instead of overshooting and correcting.
+- Pinning uses each card's layout position, so uneven rows (Top 10 rank numbers) and cards mid-animation no longer make the selection land off the card.
 - New `jellynav:select` event on `document`, fired just before a row moves to a new card, so scripts can close an open card first.
 
 ## v1 — Initial public release

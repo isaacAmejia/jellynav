@@ -17221,6 +17221,28 @@
     initialMainTab
   );
 
+  /*
+   * Pages that swap the whole home screen (JellyStream switching services)
+   * ask for a fresh start: forget every row's remembered card and scroll
+   * position and drop the selection back at the top of the page.
+   * Fire with: document.dispatchEvent(new CustomEvent('jellynav:reset'))
+   */
+  document.addEventListener(
+    'jellynav:reset',
+    () => {
+      rowNavigationMemory.clear();
+      homeOrigin = null;
+      homeReturnPending = false;
+      if (homeReturnTimer !== null) {
+        clearTimeout(homeReturnTimer);
+        homeReturnTimer = null;
+      }
+      if (resolveContext().type === 'home') {
+        beginHomePreferredFocus();
+      }
+    }
+  );
+
   createFocusRing();
 
   window.addEventListener(

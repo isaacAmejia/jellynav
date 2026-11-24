@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added a `jellynav:reset` event: pages that swap the whole home screen can ask JellyNav to forget each row's remembered card and return the selection to the top.
+
 - Up from the first Home row now moves to the header when no Media Bar banner is visible, instead of staying on the row.
 - JellyStream service pages: their billboard buttons (Play, More Info, Back to Home) are reachable with Up from the first row, the same way as the Media Bar.
 - Pinned selection everywhere: moving up or down settles the selected row at the same height under the header, and moving left or right keeps the selected card at the row's left edge while the row slides. The first row keeps the Media Bar in view.
